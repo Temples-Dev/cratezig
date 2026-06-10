@@ -161,7 +161,7 @@ pub const Container = struct {
 
         defer self.mutex.unlock(self.io);
 
-        return self.state.status = .removing;
+        return self.state.status == .removing;
     }
 
     pub fn persistState(self: *Container, cfg: *const DaemongConfig) !void {
