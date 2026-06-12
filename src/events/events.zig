@@ -109,6 +109,17 @@ pub const Events = struct {
         }
     }
 
+    pub fn subscribe(self: *Events) !*Subscriber {
+        const sub = try self.allocator.create(Subscriber);
+        sub.* = .{ .queue = RingQueue(Event, 64) };
+
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.subscribers.append(self.io, sub);
+
+        return sub;
+    }
+
     pub fn unsubscribe(self: *Events, sub: *Subscriber) void {
         self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
