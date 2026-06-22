@@ -8,8 +8,6 @@ const EndpointSettings = container_mod.EndpointSettings;
 const PortBinding = container_mod.PortBinding;
 const ExecProcess = container_mod.ExecProcess;
 
-const openError = std.Io.Dir.OpenError;
-
 pub const ContainerStore = struct {
     io: std.Io,
 
@@ -91,7 +89,7 @@ pub const ContainerStore = struct {
         const containers_dir = try std.fmt.bufPrint(&path_buf, "{s}/containers", .{data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, containers_dir, .{ .iterate = true }) catch |err| {
-            if (err == openError.FileNotFound) return;
+            if (err == std.Io.Dir.OpenError) return;
             return err;
         };
 
@@ -136,6 +134,7 @@ fn loadContainerFromFile(io: std.Io, path: []const u8, allocator: std.mem.Alloca
         else => return LoadError.InvalidJson,
     };
 
+    // ctr - Container
     const ctr = try allocator.create(Container);
     errdefer allocator.destroy(ctr);
 
