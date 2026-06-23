@@ -3,6 +3,7 @@ const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 const Image = @import("types.zig").Image;
 const ImageConfig = @import("types.zig").ImageConfig;
 const RootFS = @import("types.zig").RootFS;
+const CrateError = @import("../errdefs/errors.zig").Error;
 
 pub const LoadError = error{
     InvalidJson,
@@ -33,6 +34,68 @@ pub const ImageService = struct {
         self.lock.lockShared(self.config.io);
         defer self.lock.unlockShared(self.config.io);
         return self.by_id.get(id);
+    }
+
+    /// Resolves an image by full ID, short-ID prefix, or repo tag.
+    /// Appends ":latest" when the tag string contains no colon.
+    pub fn getImage(self: *ImageService, id_or_tag: []const u8) !*Image {
+        self.lock.lockShared(self.config.io);
+        defer self.lock.unlockShared(self.config.io);
+
+        if (self.by_id.get(id_or_tag)) |img| return img;
+
+        // Short-ID prefix — return null on ambiguity
+        var prefix_match: ?*Image = null;
+        {
+            var it = self.by_id.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.startsWith(u8, entry.key_ptr.*, id_or_tag)) {
+                    if (prefix_match != null) return CrateError.ImageNotFound;
+                    prefix_match = entry.value_ptr.*;
+                }
+            }
+        }
+        if (prefix_match) |img| return img;
+
+        // Repo-tag match; normalise bare name to name:latest
+        var tag_buf: [256]u8 = undefined;
+        const tag = if (std.mem.indexOfScalar(u8, id_or_tag, ':') != null)
+            id_or_tag
+        else
+            std.fmt.bufPrint(&tag_buf, "{s}:latest", .{id_or_tag}) catch id_or_tag;
+
+        var it = self.by_id.valueIterator();
+        while (it.next()) |img_ptr| {
+            for (img_ptr.*.repo_tags) |t| {
+                if (std.mem.eql(u8, t, tag)) return img_ptr.*;
+            }
+        }
+
+        return CrateError.ImageNotFound;
+    }
+
+    /// Creates an overlay2 writable layer for a container.
+    /// Produces: overlay2/{id}/{diff,work}/ and overlay2/{id}/lower.
+    pub fn createWritableLayer(self: *ImageService, id: *const [64]u8, image_id: []const u8) !void {
+        var layer_buf: [512]u8 = undefined;
+        const layer_path = try std.fmt.bufPrint(&layer_buf, "{s}/overlay2/{s}", .{ self.config.data_root, id });
+
+        try std.Io.Dir.createDirAbsolute(self.config.io, layer_path, .{});
+
+        var diff_buf: [530]u8 = undefined;
+        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&diff_buf, "{s}/diff", .{layer_path}), .{});
+
+        var work_buf: [530]u8 = undefined;
+        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&work_buf, "{s}/work", .{layer_path}), .{});
+
+        var lower_path_buf: [530]u8 = undefined;
+        const lower_path = try std.fmt.bufPrint(&lower_path_buf, "{s}/lower", .{layer_path});
+
+        const lower_file = try std.Io.Dir.createFileAbsolute(self.config.io, lower_path, .{});
+        defer lower_file.close(self.config.io);
+
+        var write_buf: [128]u8 = undefined;
+        try lower_file.writer(self.config.io, &write_buf).writeAll(image_id);
     }
 
     pub fn list(self: *ImageService, allocator: std.mem.Allocator) ![]*Image {
