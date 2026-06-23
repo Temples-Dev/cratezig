@@ -67,7 +67,7 @@ pub const Daemon = struct {
         for (dirs) |suffix| {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.config.data_root, suffix });
-            std.fs.makeDirAbsolute(path) catch |err| {
+            std.Io.Dir.createDirAbsolute(self.config.io, path, .{}) catch |err| {
                 if (err != std.Io.Dir.ReadFileError) return err;
             };
         }
