@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const DaemongConfig = @import("../config/config.zig").DaemonConfig;
+const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 
 pub const ContainerConfig = struct {
     image: []const u8,
@@ -164,7 +164,7 @@ pub const Container = struct {
         return self.state.status == .removing;
     }
 
-    pub fn persistState(self: *Container, cfg: *const DaemongConfig) !void {
+    pub fn persistState(self: *Container, cfg: *const DaemonConfig) !void {
         var path_buf: [512]u8 = undefined;
 
         const dir = cfg.containerDir(&self.id, &path_buf);
@@ -178,7 +178,8 @@ pub const Container = struct {
         const file = try std.Io.Dir.createFileAbsolute(self.io, state_path, .{});
         defer file.close(self.io);
 
-        try std.json.Stringify.encodeJsonString(self.state, .{}, file.writer(self.io, state_path_buf)); // return here again = it could introduce a problem with the writer.
+        var write_buf: [4096]u8 = undefined;
+        try std.json.stringify(self.state, .{}, file.writer(self.io, &write_buf));
     }
 };
 
