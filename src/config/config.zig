@@ -54,12 +54,12 @@ pub const DaemonConfig = struct {
     }
 
     /// {data_root}/containers/
-    pub fn containersDir(self: *const DaemonConfig, buf: []u8) u8 {
+    pub fn containersDir(self: *const DaemonConfig, buf: []u8) []u8 {
         return std.fmt.bufPrint(buf, "{s}/containers", .{self.data_root}) catch unreachable;
     }
 
     /// {data_root}/containers/{id}
-    pub fn containerDir(self: *const DaemonConfig, id: []const u8, buf: []u8) u8 {
+    pub fn containerDir(self: *const DaemonConfig, id: []const u8, buf: []u8) []u8 {
         return std.fmt.bufPrint(buf, "{s}/containers/{s}", .{ self.data_root, id }) catch unreachable;
     }
 
@@ -81,18 +81,17 @@ pub const DaemonConfig = struct {
     /// Load config from JSON file. Returns defaults if file doesn't exist
     pub fn loadConfig(self: *const DaemonConfig, allocator: std.mem.Allocator, path: []const u8) !DaemonConfig {
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch |err| {
-            if (err == openError.FileNotFound) return DaemonConfig{};
+            if (err == openError.FileNotFound) return self.*;
             return err;
         };
 
         defer file.close(self.io);
 
-        const content = try file.reader(self.io, 1024 * 1024); // something is wrong here: I am not using aallocator yet freeing one
-
-        defer allocator.free(content); // be back: and fix this.
+        var read_buf: [4096]u8 = undefined;
+        const content = try file.reader(self.io, &read_buf).readAllAlloc(allocator, 1024 * 1024);
+        defer allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(DaemonConfig, allocator, content, .{ .ignore_unknown_fields = true });
-
         defer parsed.deinit();
 
         return parsed.value;
