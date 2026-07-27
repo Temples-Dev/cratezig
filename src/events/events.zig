@@ -80,6 +80,7 @@ pub const Subscriber = struct {
 };
 
 pub const Events = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .{},
 
@@ -89,8 +90,16 @@ pub const Events = struct {
 
     subscribers: std.ArrayList(*Subscriber),
 
-    pub fn init(allocator: std.mem.Allocator) Events {
-        return .{ .allocator = allocator, .subscribers = std.ArrayList(*Subscriber).init(allocator) };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Events {
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .subscribers = std.ArrayList(*Subscriber).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Events) void {
+        self.subscribers.deinit();
     }
 
     pub fn publish(self: *Events, event: Event) void {
@@ -102,20 +111,20 @@ pub const Events = struct {
         if (self.ring_count < 256) self.ring_count += 1;
 
         for (self.subscribers.items) |sub| {
-            sub.mutex.lock(self.io);
+            sub.mutex.lock(sub.io);
             sub.queue.push(event) catch {};
-            sub.cond.signal(self.io);
-            sub.mutex.unlock(self.io);
+            sub.cond.signal(sub.io);
+            sub.mutex.unlock(sub.io);
         }
     }
 
     pub fn subscribe(self: *Events) !*Subscriber {
         const sub = try self.allocator.create(Subscriber);
-        sub.* = .{ .queue = RingQueue(Event, 64) };
+        sub.* = Subscriber.init(self.io);
 
         self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.subscribers.append(self.io, sub);
+        try self.subscribers.append(sub);
 
         return sub;
     }
@@ -124,12 +133,14 @@ pub const Events = struct {
         self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        for (self.subscribers.items, 0..) |s, i| void{if (s == sub) {
-            _ = self.subscribers.swapRemove(i);
-            break;
-        }};
+        for (self.subscribers.items, 0..) |s, i| {
+            if (s == sub) {
+                _ = self.subscribers.swapRemove(i);
+                break;
+            }
+        }
 
-        sub.close(self.io);
+        sub.close();
         self.allocator.destroy(sub);
     }
 };
