@@ -14,7 +14,6 @@ pub const ImageService = struct {
     allocator: std.mem.Allocator,
     config: DaemonConfig,
     by_id: std.StringHashMap(*Image),
-    /// Secondary index keyed by "repo:tag" → O(1) tag-based lookups.
     by_tag: std.StringHashMap(*Image),
     lock: std.Io.RwLock = .init,
 
@@ -40,17 +39,12 @@ pub const ImageService = struct {
         return self.by_id.get(id);
     }
 
-    /// Resolves an image by full ID, short-ID prefix, or repo tag.
-    /// Tag lookups are O(1) via the by_tag secondary index.
-    /// Appends ":latest" when the tag string contains no colon.
     pub fn getImage(self: *ImageService, id_or_tag: []const u8) !*Image {
         self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
 
-        // O(1) exact ID lookup.
         if (self.by_id.get(id_or_tag)) |img| return img;
 
-        // O(1) repo:tag lookup via secondary index.
         var tag_buf: [256]u8 = undefined;
         const tag = if (std.mem.indexOfScalar(u8, id_or_tag, ':') != null)
             id_or_tag
@@ -59,7 +53,6 @@ pub const ImageService = struct {
 
         if (self.by_tag.get(tag)) |img| return img;
 
-        // O(log N) short-ID prefix scan (uncommon path — full hash not supplied).
         var prefix_match: ?*Image = null;
         var it = self.by_id.iterator();
         while (it.next()) |entry| {
@@ -141,7 +134,6 @@ const overlay = @import("overlay.zig");
             };
 
             try self.by_id.put(img.id, img);
-            // Index all tags for O(1) lookup.
             for (img.repo_tags) |t| {
                 try self.by_tag.put(t, img);
             }
@@ -248,7 +240,6 @@ const overlay = @import("overlay.zig");
         const new_tag = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ repo, tag_val });
         errdefer self.allocator.free(new_tag);
 
-        // Dedup: tag already present.
         if (self.by_tag.contains(new_tag)) {
             self.allocator.free(new_tag);
             return;
@@ -262,7 +253,6 @@ const overlay = @import("overlay.zig");
         img.repo_tags = new_tags;
         if (old_tags.len > 0) self.allocator.free(old_tags);
 
-        // Update secondary index.
         try self.by_tag.put(new_tag, img);
 
         try self.saveImageToDisk(img);
@@ -280,7 +270,6 @@ const overlay = @import("overlay.zig");
         else
             std.fmt.bufPrint(&tag_buf, "{s}:latest", .{name}) catch name;
 
-        // O(1) tag lookup via secondary index.
         var found_img: ?*Image = self.by_tag.get(target_tag);
         const tag_to_remove: ?[]const u8 = if (found_img != null) target_tag else null;
 
@@ -290,7 +279,6 @@ const overlay = @import("overlay.zig");
                 found_img = img;
                 is_id_match = true;
             } else {
-                // Prefix scan — uncommon path.
                 var prefix_match: ?*Image = null;
                 var it2 = self.by_id.iterator();
                 while (it2.next()) |entry| {
@@ -335,7 +323,6 @@ const overlay = @import("overlay.zig");
             self.allocator.free(img.repo_digests);
             self.allocator.destroy(img);
         } else {
-            // Untag: remove only the requested tag.
             _ = self.by_tag.remove(tag_to_remove.?);
 
             var new_tags = try self.allocator.alloc([]const u8, img.repo_tags.len - 1);
@@ -365,7 +352,6 @@ const overlay = @import("overlay.zig");
         var tag_buf: [256]u8 = undefined;
         const target_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ from_image, tag_val });
 
-        // O(1) cache hit — image already present.
         if (self.by_tag.get(target_tag)) |img| return img;
 
         var bytes: [32]u8 = undefined;
@@ -400,7 +386,6 @@ const overlay = @import("overlay.zig");
 
         try self.saveImageToDisk(img);
         try self.by_id.put(img.id, img);
-        // Index the tag for O(1) future lookups.
         try self.by_tag.put(img.repo_tags[0], img);
 
         return img;

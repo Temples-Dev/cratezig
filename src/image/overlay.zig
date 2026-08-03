@@ -139,7 +139,6 @@ fn generateShortName(out: *[26]u8) void {
 }
 
 fn expandLowerPaths(data_root: []const u8, lower: []const u8, buf: []u8) ![]u8 {
-    // Write directly into the caller's stack buffer — no heap allocation.
     // "l/ABCD:l/EFGH" → "{data_root}/overlay2/l/ABCD:{data_root}/overlay2/l/EFGH"
     var pos: usize = 0;
     var it = std.mem.splitScalar(u8, lower, ':');

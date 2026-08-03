@@ -1,23 +1,13 @@
 const std = @import("std");
 
-/// Bitmap-based IP address manager.
-///
-/// Replaces the previous StringHashMap-of-allocated-IPs design with a compact
-/// bit-per-address bitmap and a next-fit cursor.  This brings allocation from
-/// O(N) (linear scan + string format + hash lookup per candidate) down to
-/// O(1) amortised, and shrinks memory from ~24 bytes per address (HashMap
-/// string key) to 1 bit per address — a 187× reduction for a /16 subnet.
 pub const IPAM = struct {
     allocator: std.mem.Allocator,
     subnet: []const u8,
     gateway: []const u8,
-    /// Owned slice; ceil(host_count / 8) bytes.
     bitmap: []u8,
     base: u32,
     host_bits: u6,
-    /// Next-fit cursor: index into the host portion (1-based, skips .0 and broadcast).
     cursor: u32,
-    /// Number of currently-allocated addresses (for exhaustion check).
     used: u32,
 
     pub fn init(allocator: std.mem.Allocator, subnet: []const u8, gateway: []const u8) !IPAM {
@@ -27,7 +17,6 @@ pub const IPAM = struct {
         const host_bits: u6 = 32 - prefix_len;
         const host_count: u32 = @as(u32, 1) << @as(u5, @intCast(host_bits));
 
-        // Allocate and zero-fill the bitmap.
         const bitmap_bytes = (host_count + 7) / 8;
         const bitmap = try allocator.alloc(u8, bitmap_bytes);
         @memset(bitmap, 0);
@@ -45,14 +34,11 @@ pub const IPAM = struct {
             .used = 0,
         };
 
-        // Mark network address (.0) and broadcast as reserved.
         self.markUsed(0);
         self.markUsed(host_count - 1);
 
-        // Reserve the gateway.
         const gw_host = parseIPv4(gateway) orelse return error.InvalidParameter;
-        const gw_offset = gw_host - base;
-        self.markUsed(gw_offset);
+        self.markUsed(gw_host - base);
 
         return self;
     }
@@ -61,40 +47,33 @@ pub const IPAM = struct {
         self.allocator.free(self.bitmap);
     }
 
-    /// Allocate the next available IP. Returns it as a caller-owned string.
-    /// O(1) amortised via next-fit cursor.
     pub fn allocate(self: *IPAM) ![]const u8 {
         const host_count: u32 = @as(u32, 1) << @as(u5, @intCast(self.host_bits));
-        // -2: exclude network address and broadcast (already marked but be explicit).
         const usable = host_count - 2;
 
         if (self.used >= usable) return error.SubnetExhausted;
 
         var tried: u32 = 0;
         while (tried < host_count) : (tried += 1) {
-            const offset = (self.cursor % host_count);
+            const offset = self.cursor % host_count;
             self.cursor = offset + 1;
 
-            if (offset == 0 or offset == host_count - 1) continue; // .0 / broadcast
+            if (offset == 0 or offset == host_count - 1) continue;
             if (self.isFree(offset)) {
                 self.markUsed(offset);
                 self.used += 1;
-                // Format only at the API boundary, not in the probe loop.
                 const ip_int = self.base | offset;
-                const owned = try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}", .{
+                return try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}", .{
                     (ip_int >> 24) & 0xff,
                     (ip_int >> 16) & 0xff,
                     (ip_int >> 8) & 0xff,
                     ip_int & 0xff,
                 });
-                return owned;
             }
         }
         return error.SubnetExhausted;
     }
 
-    /// Release an IP back to the pool. The string must have been returned by
-    /// `allocate`; it is freed here.
     pub fn release(self: *IPAM, ip: []const u8) void {
         if (std.mem.eql(u8, ip, self.gateway)) {
             self.allocator.free(ip);
@@ -109,8 +88,6 @@ pub const IPAM = struct {
         }
         self.allocator.free(ip);
     }
-
-    // ── Bitmap helpers ────────────────────────────────────────────────────────
 
     inline fn isFree(self: *const IPAM, offset: u32) bool {
         const byte = offset / 8;
@@ -133,8 +110,6 @@ pub const IPAM = struct {
         const bit: u8 = @as(u8, 1) << @intCast(offset % 8);
         self.bitmap[byte] &= ~bit;
     }
-
-    // ── IPv4 helpers ─────────────────────────────────────────────────────────
 
     fn parseIPv4(s: []const u8) ?u32 {
         var parts = std.mem.splitScalar(u8, s, '.');

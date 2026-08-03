@@ -1,8 +1,5 @@
 const std = @import("std");
 
-/// Path parameter store backed by a small inline array.
-/// Routes have at most 2 path parameters ({name}, {id}, etc.) so 8 slots is
-/// more than enough. Zero heap allocation — stored directly in the Request.
 pub const PathParams = struct {
     entries: [8]struct { key: []const u8, val: []const u8 } = undefined,
     len: u8 = 0,
@@ -20,7 +17,6 @@ pub const PathParams = struct {
     }
 
     pub fn get(self: *const PathParams, key: []const u8) ?[]const u8 {
-        // Linear scan over ≤8 items: faster than a HashMap for small N.
         for (self.entries[0..self.len]) |e| {
             if (std.mem.eql(u8, e.key, key)) return e.val;
         }
