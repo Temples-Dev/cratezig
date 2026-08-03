@@ -195,6 +195,113 @@ pub const NetworkController = struct {
 
         return net;
     }
+
+    pub fn saveNetworkToDisk(self: *NetworkController, net: *const Network) !void {
+        var path_buf: [512]u8 = undefined;
+        const net_path = try std.fmt.bufPrint(&path_buf, "{s}/network/files/{s}.json", .{ self.config.data_root, net.id });
+
+        const file = try std.Io.Dir.createFileAbsolute(self.config.io, net_path, .{});
+        defer file.close(self.config.io);
+
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(self.config.io, &write_buf);
+        var writer = &file_writer.interface;
+
+        try writer.writeAll("{");
+        try writer.print("\"Id\":\"{s}\",", .{net.id});
+        try writer.print("\"Name\":\"{s}\",", .{net.name});
+        try writer.print("\"Driver\":\"{s}\",", .{net.driver});
+        try writer.print("\"Created\":{d},", .{net.created});
+        try writer.print("\"Internal\":{},", .{net.internel});
+        try writer.print("\"EnableIPv6\":{}", .{net.enable_ipv6});
+        try writer.writeAll("}");
+    }
+
+    pub fn createNetwork(self: *NetworkController, name: []const u8, driver: []const u8, subnet: ?[]const u8, gateway: ?[]const u8) !*Network {
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        if (self.by_name.contains(name)) return error.NetworkAlreadyExists;
+
+        const id = try generateId(self.config.io, self.allocator);
+        errdefer self.allocator.free(id);
+
+        const name_dup = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_dup);
+
+        const driver_dup = try self.allocator.dupe(u8, driver);
+        errdefer self.allocator.free(driver_dup);
+
+        var pools: []IPAMPoolConfig = &.{};
+        if (subnet) |s| {
+            pools = try self.allocator.alloc(IPAMPoolConfig, 1);
+            pools[0] = .{
+                .subnet = try self.allocator.dupe(u8, s),
+                .gateway = if (gateway) |gw| try self.allocator.dupe(u8, gw) else try self.allocator.dupe(u8, ""),
+            };
+        }
+
+        const net = try self.allocator.create(Network);
+        errdefer self.allocator.destroy(net);
+
+        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
+
+        net.* = .{
+            .id = id,
+            .name = name_dup,
+            .driver = driver_dup,
+            .created = @intCast(now),
+            .ipam = .{ .configs = pools },
+        };
+
+        try self.by_id.put(net.id, net);
+        try self.by_name.put(net.name, net.id);
+
+        if (std.mem.eql(u8, driver, "bridge") and subnet != null) {
+            const ipam_inst = try self.allocator.create(IPAM);
+            ipam_inst.* = try IPAM.init(self.allocator, subnet.?, gateway orelse "");
+            try self.ipam_pools.put(net.id, ipam_inst);
+        }
+
+        try self.saveNetworkToDisk(net);
+
+        return net;
+    }
+
+    pub fn deleteNetwork(self: *NetworkController, id_or_name: []const u8) !void {
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        const net = self.get(id_or_name) orelse return error.NetworkNotFound;
+
+        if (std.mem.eql(u8, net.name, "bridge")) {
+            return error.Forbidden;
+        }
+
+        var path_buf: [512]u8 = undefined;
+        const net_path = try std.fmt.bufPrint(&path_buf, "{s}/network/files/{s}.json", .{ self.config.data_root, net.id });
+        std.Io.Dir.deleteFileAbsolute(self.config.io, net_path) catch |err| {
+            std.log.warn("failed to delete network file {s}: {}", .{ net_path, err });
+        };
+
+        _ = self.by_id.remove(net.id);
+        _ = self.by_name.remove(net.name);
+
+        if (self.ipam_pools.fetchRemove(net.id)) |kv| {
+            kv.value.deinit();
+            self.allocator.destroy(kv.value);
+        }
+
+        self.allocator.free(net.id);
+        self.allocator.free(net.name);
+        self.allocator.free(net.driver);
+        for (net.ipam.configs) |c| {
+            self.allocator.free(c.subnet);
+            self.allocator.free(c.gateway);
+        }
+        self.allocator.free(net.ipam.configs);
+        self.allocator.destroy(net);
+    }
 };
 
 fn generateId(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {

@@ -123,4 +123,139 @@ pub const VolumeService = struct {
 
         return vol;
     }
+
+    pub fn saveVolumeToDisk(self: *VolumeService, vol: *const Volume) !void {
+        var path_buf: [512]u8 = undefined;
+        const opts_path = try std.fmt.bufPrint(&path_buf, "{s}/volumes/{s}/opts.json", .{ self.config.data_root, vol.name });
+
+        const file = try std.Io.Dir.createFileAbsolute(self.config.io, opts_path, .{});
+        defer file.close(self.config.io);
+
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(self.config.io, &write_buf);
+        var writer = &file_writer.interface;
+
+        try writer.writeAll("{");
+        try writer.print("\"CreatedAt\":{d},", .{vol.created});
+        try writer.print("\"Driver\":\"{s}\",", .{vol.driver});
+        
+        try writer.writeAll("\"Labels\":{");
+        var label_it = vol.labels.iterator();
+        var l_idx: usize = 0;
+        while (label_it.next()) |entry| {
+            if (l_idx > 0) try writer.writeByte(',');
+            try writer.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
+            l_idx += 1;
+        }
+        try writer.writeAll("},");
+
+        try writer.writeAll("\"Options\":{");
+        var opts_it = vol.options.iterator();
+        var o_idx: usize = 0;
+        while (opts_it.next()) |entry| {
+            if (o_idx > 0) try writer.writeByte(',');
+            try writer.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
+            o_idx += 1;
+        }
+        try writer.writeAll("}");
+
+        try writer.writeAll("}");
+    }
+
+    pub fn createVolume(self: *VolumeService, name: []const u8, driver: ?[]const u8, labels: ?std.StringHashMap([]const u8), options: ?std.StringHashMap([]const u8)) !*Volume {
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        if (self.by_name.contains(name)) return error.VolumeAlreadyExists;
+
+        var vol_dir_buf: [512]u8 = undefined;
+        const vol_dir = try std.fmt.bufPrint(&vol_dir_buf, "{s}/volumes/{s}", .{ self.config.data_root, name });
+        std.Io.Dir.createDirAbsolute(self.config.io, vol_dir, .default_dir) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
+
+        var data_dir_buf: [512]u8 = undefined;
+        const data_dir = try std.fmt.bufPrint(&data_dir_buf, "{s}/volumes/{s}/_data", .{ self.config.data_root, name });
+        std.Io.Dir.createDirAbsolute(self.config.io, data_dir, .default_dir) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
+
+        const vol = try self.allocator.create(Volume);
+        errdefer self.allocator.destroy(vol);
+
+        vol.name = try self.allocator.dupe(u8, name);
+        vol.driver = try self.allocator.dupe(u8, driver orelse "local");
+        vol.mountpoint = try self.allocator.dupe(u8, data_dir);
+
+        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
+        vol.created = @intCast(now);
+        vol.labels = std.StringHashMap([]const u8).init(self.allocator);
+        vol.options = std.StringHashMap([]const u8).init(self.allocator);
+        vol.scope = "local";
+
+        if (labels) |l| {
+            var it = l.iterator();
+            while (it.next()) |entry| {
+                const k = try self.allocator.dupe(u8, entry.key_ptr.*);
+                const v = try self.allocator.dupe(u8, entry.value_ptr.*);
+                try vol.labels.put(k, v);
+            }
+        }
+
+        if (options) |o| {
+            var it = o.iterator();
+            while (it.next()) |entry| {
+                const k = try self.allocator.dupe(u8, entry.key_ptr.*);
+                const v = try self.allocator.dupe(u8, entry.value_ptr.*);
+                try vol.options.put(k, v);
+            }
+        }
+
+        try self.by_name.put(vol.name, vol);
+        try self.saveVolumeToDisk(vol);
+
+        return vol;
+    }
+
+    pub fn deleteVolume(self: *VolumeService, name: []const u8, force: bool) !void {
+        _ = force;
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        const vol = self.by_name.get(name) orelse return error.VolumeNotFound;
+
+        var opts_buf: [512]u8 = undefined;
+        const opts_path = try std.fmt.bufPrint(&opts_buf, "{s}/volumes/{s}/opts.json", .{ self.config.data_root, name });
+        std.Io.Dir.deleteFileAbsolute(self.config.io, opts_path) catch {};
+
+        var data_dir_buf: [512]u8 = undefined;
+        const data_dir = try std.fmt.bufPrint(&data_dir_buf, "{s}/volumes/{s}/_data", .{ self.config.data_root, name });
+        std.Io.Dir.deleteDirAbsolute(self.config.io, data_dir) catch {};
+
+        var vol_dir_buf: [512]u8 = undefined;
+        const vol_dir = try std.fmt.bufPrint(&vol_dir_buf, "{s}/volumes/{s}", .{ self.config.data_root, name });
+        std.Io.Dir.deleteDirAbsolute(self.config.io, vol_dir) catch {};
+
+        _ = self.by_name.remove(name);
+
+        self.allocator.free(vol.name);
+        self.allocator.free(vol.driver);
+        self.allocator.free(vol.mountpoint);
+        
+        var label_it = vol.labels.iterator();
+        while (label_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        vol.labels.deinit();
+
+        var opts_it = vol.options.iterator();
+        while (opts_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        vol.options.deinit();
+
+        self.allocator.destroy(vol);
+    }
 };
