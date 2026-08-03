@@ -16,8 +16,8 @@ pub const ContainerStore = struct {
     lock: std.Io.RwLock = .init,
 
     by_id: std.StringHashMap(*Container),
-
     by_name: std.StringHashMap([]const u8),
+    sorted_ids: std.ArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) ContainerStore {
         return .{
@@ -25,10 +25,12 @@ pub const ContainerStore = struct {
             .allocator = allocator,
             .by_id = std.StringHashMap(*Container).init(allocator),
             .by_name = std.StringHashMap([]const u8).init(allocator),
+            .sorted_ids = std.ArrayList([]const u8).empty,
         };
     }
 
     pub fn deinit(self: *ContainerStore) void {
+        self.sorted_ids.deinit(self.allocator);
         self.by_id.deinit();
         self.by_name.deinit();
     }
@@ -40,6 +42,12 @@ pub const ContainerStore = struct {
         const id = ctr.id[0..];
         try self.by_id.put(id, ctr);
         try self.by_name.put(ctr.name, id);
+
+        var idx: usize = 0;
+        while (idx < self.sorted_ids.items.len) : (idx += 1) {
+            if (std.mem.order(u8, id, self.sorted_ids.items[idx]) == .lt) break;
+        }
+        try self.sorted_ids.insert(self.allocator, idx, id);
     }
 
     pub fn get(self: *ContainerStore, id_or_prefix: []const u8) ?*Container {
@@ -47,21 +55,29 @@ pub const ContainerStore = struct {
         defer self.lock.unlockShared(self.io);
 
         if (self.by_id.get(id_or_prefix)) |ctr| return ctr;
+        if (self.by_name.get(id_or_prefix)) |id| return self.by_id.get(id);
 
-        if (self.by_name.get(id_or_prefix)) |id| {
-            return self.by_id.get(id);
-        }
+        if (id_or_prefix.len == 0 or self.sorted_ids.items.len == 0) return null;
 
-        // Prefix match: scan all IDs, return null on ambiguity
-        var match: ?*Container = null;
-        var it = self.by_id.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.startsWith(u8, entry.key_ptr.*, id_or_prefix)) {
-                if (match != null) return null;
-                match = entry.value_ptr.*;
+        var low: usize = 0;
+        var high: usize = self.sorted_ids.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (std.mem.order(u8, self.sorted_ids.items[mid], id_or_prefix) == .lt) {
+                low = mid + 1;
+            } else {
+                high = mid;
             }
         }
-        return match;
+
+        if (low < self.sorted_ids.items.len and std.mem.startsWith(u8, self.sorted_ids.items[low], id_or_prefix)) {
+            if (low + 1 < self.sorted_ids.items.len and std.mem.startsWith(u8, self.sorted_ids.items[low + 1], id_or_prefix)) {
+                return null;
+            }
+            return self.by_id.get(self.sorted_ids.items[low]);
+        }
+
+        return null;
     }
 
     pub fn delete(self: *ContainerStore, id: []const u8) void {
@@ -70,6 +86,12 @@ pub const ContainerStore = struct {
 
         if (self.by_id.fetchRemove(id)) |entry| {
             _ = self.by_name.remove(entry.value.name);
+            for (self.sorted_ids.items, 0..) |s_id, idx| {
+                if (std.mem.eql(u8, s_id, id)) {
+                    _ = self.sorted_ids.orderedRemove(idx);
+                    break;
+                }
+            }
         }
     }
 
