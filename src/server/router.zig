@@ -72,10 +72,23 @@ const ROUTES = [_]Route{
 pub fn dispatch(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const path = stripVersion(req.path);
 
+    inline for (ROUTES) |route| {
+        if (comptime std.mem.indexOfScalar(u8, route.pattern, '{') == null) {
+            if (std.mem.eql(u8, route.method, req.method) and std.mem.eql(u8, route.pattern, path)) {
+                return route.handler(daemon, req, alloc);
+            }
+        }
+    }
+
     for (ROUTES) |route| {
-        if (!std.mem.eql(u8, route.method, req.method)) continue;
-        if (matchPattern(route.pattern, path, &req.params)) {
-            return route.handler(daemon, req, alloc);
+        if (comptime std.mem.indexOfScalar(u8, route.pattern, '{') != null) {
+            if (std.mem.eql(u8, route.method, req.method)) {
+                var tmp_params = PathParams{};
+                if (matchPattern(route.pattern, path, &tmp_params)) {
+                    req.params = tmp_params;
+                    return route.handler(daemon, req, alloc);
+                }
+            }
         }
     }
 
@@ -102,7 +115,7 @@ fn matchPattern(pattern: []const u8, path: []const u8, params: *PathParams) bool
         if (p == null or s == null) return false;
         if (p.?.len > 0 and p.?[0] == '{' and p.?[p.?.len - 1] == '}') {
             const key = p.?[1 .. p.?.len - 1];
-            params.put(key, s.?) catch {};
+            params.put(key, s.?) catch return false;
         } else {
             if (!std.mem.eql(u8, p.?, s.?)) return false;
         }
