@@ -11,6 +11,11 @@ pub const InstructionKind = enum {
     cmd,
     entrypoint,
     arg,
+    label,
+    user,
+    healthcheck,
+    volume,
+    shell,
 };
 
 pub const Instruction = struct {
@@ -36,21 +41,40 @@ pub const Dockerfile = struct {
             list.deinit(allocator);
         }
 
+        var multiline_buf = std.ArrayList(u8).empty;
+        defer multiline_buf.deinit(allocator);
+
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |raw_line| {
             const trimmed = std.mem.trim(u8, raw_line, " \r\t");
-            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            if (trimmed.len == 0 or (multiline_buf.items.len == 0 and trimmed[0] == '#')) continue;
 
-            const space_idx = std.mem.indexOfScalar(u8, trimmed, ' ') orelse trimmed.len;
-            const verb = trimmed[0..space_idx];
-            const rest = if (space_idx < trimmed.len) std.mem.trim(u8, trimmed[space_idx + 1 ..], " \t") else "";
+            if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\\') {
+                const part = std.mem.trim(u8, trimmed[0 .. trimmed.len - 1], " \t");
+                if (multiline_buf.items.len > 0) try multiline_buf.append(allocator, ' ');
+                try multiline_buf.appendSlice(allocator, part);
+                continue;
+            }
+
+            var line_to_parse = trimmed;
+            if (multiline_buf.items.len > 0) {
+                try multiline_buf.append(allocator, ' ');
+                try multiline_buf.appendSlice(allocator, trimmed);
+                line_to_parse = multiline_buf.items;
+            }
+
+            defer multiline_buf.clearRetainingCapacity();
+
+            const space_idx = std.mem.indexOfScalar(u8, line_to_parse, ' ') orelse line_to_parse.len;
+            const verb = line_to_parse[0..space_idx];
+            const rest = if (space_idx < line_to_parse.len) std.mem.trim(u8, line_to_parse[space_idx + 1 ..], " \t") else "";
 
             const kind = parseKind(verb) orelse continue;
             const args = try parseArgs(allocator, rest);
 
             try list.append(allocator, .{
                 .kind = kind,
-                .raw = try allocator.dupe(u8, trimmed),
+                .raw = try allocator.dupe(u8, line_to_parse),
                 .args = args,
             });
         }
@@ -78,6 +102,11 @@ fn parseKind(verb: []const u8) ?InstructionKind {
     if (std.ascii.eqlIgnoreCase(verb, "CMD")) return .cmd;
     if (std.ascii.eqlIgnoreCase(verb, "ENTRYPOINT")) return .entrypoint;
     if (std.ascii.eqlIgnoreCase(verb, "ARG")) return .arg;
+    if (std.ascii.eqlIgnoreCase(verb, "LABEL")) return .label;
+    if (std.ascii.eqlIgnoreCase(verb, "USER")) return .user;
+    if (std.ascii.eqlIgnoreCase(verb, "HEALTHCHECK")) return .healthcheck;
+    if (std.ascii.eqlIgnoreCase(verb, "VOLUME")) return .volume;
+    if (std.ascii.eqlIgnoreCase(verb, "SHELL")) return .shell;
     return null;
 }
 

@@ -94,7 +94,7 @@ pub const Builder = struct {
                         final_cmd = try self.allocator.dupe(u8, inst.args[0]);
                     }
                 },
-                .run, .copy, .add, .expose, .entrypoint, .arg => {},
+                .run, .copy, .add, .expose, .entrypoint, .arg, .label, .user, .healthcheck, .volume, .shell => {},
             }
 
             var layer_bytes: [32]u8 = undefined;
@@ -141,4 +141,46 @@ test "build Docker project and verify layer cache" {
     // Second build run (cache warm)
     const img2 = try builder.build(dockerfile, "/tmp", "my-app:v1");
     try std.testing.expectEqualStrings(img1.id, img2.id);
+}
+
+test "experiment on real GEase backend Dockerfile" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.openFileAbsolute(io, "/home/life-mac-africa/Work/GEase/backend/Dockerfile", .{}) catch return;
+    defer file.close(io);
+
+    var read_buf: [2048]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    var content_buf: [4096]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&content_buf);
+    const dockerfile_content = content_buf[0..n];
+
+    var cfg = DaemonConfig.init(io);
+    cfg.data_root = "/tmp/cratezig-gease-test";
+
+    var image_service = try ImageService.init(alloc, cfg);
+    defer image_service.deinit();
+
+    var builder = Builder.init(alloc, cfg, &image_service);
+    defer builder.deinit();
+
+    const start_cold = std.Io.Clock.now(.awake, io).toNanoseconds();
+    const img_cold = try builder.build(dockerfile_content, "/home/life-mac-africa/Work/GEase/backend", "gease-backend:latest");
+    const duration_cold_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_cold, 1000000);
+
+    const start_warm = std.Io.Clock.now(.awake, io).toNanoseconds();
+    const img_warm = try builder.build(dockerfile_content, "/home/life-mac-africa/Work/GEase/backend", "gease-backend:latest");
+    const duration_warm_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_warm, 1000000);
+
+    try std.testing.expectEqualStrings(img_cold.id, img_warm.id);
+
+    var df = try Dockerfile.parse(alloc, dockerfile_content);
+    defer df.deinit();
+
+    std.debug.print("\n=== GEase Backend Build Benchmark ===\n", .{});
+    std.debug.print("Parsed instructions: {d}\n", .{df.instructions.len});
+    std.debug.print("Cold build duration: {d} ms\n", .{duration_cold_ms});
+    std.debug.print("Warm build duration (cache hit): {d} ms\n", .{duration_warm_ms});
+    std.debug.print("======================================\n", .{});
 }
