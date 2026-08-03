@@ -15,4 +15,5 @@ test "compilation check" {
     _ = @import("server/handlers/networks.zig");
     _ = @import("server/handlers/volumes.zig");
     _ = @import("server/handlers/system.zig");
+    _ = @import("builder/dockerfile.zig");
 }
