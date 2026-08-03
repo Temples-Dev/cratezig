@@ -103,6 +103,7 @@ pub const Builder = struct {
             @memcpy(&hex_buf, std.fmt.bytesToHex(layer_bytes, .lower)[0..64]);
 
             const step_layer = try std.fmt.allocPrint(self.allocator, "sha256:{s}", .{hex_buf});
+            defer self.allocator.free(step_layer);
             try self.cache.put(self.config.io, cache_key, step_layer);
             current_parent = step_layer;
         }
@@ -111,3 +112,33 @@ pub const Builder = struct {
         return img;
     }
 };
+
+test "build Docker project and verify layer cache" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var cfg = DaemonConfig.init(io);
+    cfg.data_root = "/tmp/cratezig-test-data";
+
+    var image_service = try ImageService.init(alloc, cfg);
+    defer image_service.deinit();
+
+    var builder = Builder.init(alloc, cfg, &image_service);
+    defer builder.deinit();
+
+    const dockerfile =
+        \\FROM alpine:3.18
+        \\ENV APP_PORT=8080
+        \\WORKDIR /var/www
+        \\RUN echo "building cratezig app"
+        \\CMD ["./server"]
+    ;
+
+    // First build run (cache cold)
+    const img1 = try builder.build(dockerfile, "/tmp", "my-app:v1");
+    try std.testing.expect(img1.id.len > 0);
+
+    // Second build run (cache warm)
+    const img2 = try builder.build(dockerfile, "/tmp", "my-app:v1");
+    try std.testing.expectEqualStrings(img1.id, img2.id);
+}

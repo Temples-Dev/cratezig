@@ -29,6 +29,17 @@ pub const ImageService = struct {
     }
 
     pub fn deinit(self: *ImageService) void {
+        var it = self.by_id.iterator();
+        while (it.next()) |entry| {
+            const img = entry.value_ptr.*;
+            self.allocator.free(img.id);
+            for (img.repo_tags) |t| self.allocator.free(t);
+            self.allocator.free(img.repo_tags);
+            self.allocator.free(img.architecture);
+            self.allocator.free(img.os);
+            img.config.exposesd_ports.deinit();
+            self.allocator.destroy(img);
+        }
         self.by_id.deinit();
         self.by_tag.deinit();
     }
@@ -349,8 +360,15 @@ const overlay = @import("overlay.zig");
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
+        var repo = from_image;
+        var tag_str = tag_val;
+        if (std.mem.indexOfScalar(u8, from_image, ':')) |colon| {
+            repo = from_image[0..colon];
+            tag_str = from_image[colon + 1 ..];
+        }
+
         var tag_buf: [256]u8 = undefined;
-        const target_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ from_image, tag_val });
+        const target_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ repo, tag_str });
 
         if (self.by_tag.get(target_tag)) |img| return img;
 
@@ -362,21 +380,35 @@ const overlay = @import("overlay.zig");
         const full_id = try std.fmt.allocPrint(self.allocator, "sha256:{s}", .{hex_buf});
         errdefer self.allocator.free(full_id);
 
+        var repo_tags = try self.allocator.alloc([]const u8, 1);
+        errdefer self.allocator.free(repo_tags);
+
+        repo_tags[0] = try self.allocator.dupe(u8, target_tag);
+        errdefer self.allocator.free(repo_tags[0]);
+
         const img = try self.allocator.create(Image);
-        errdefer self.allocator.destroy(img);
+        errdefer {
+            self.allocator.free(full_id);
+            self.allocator.free(repo_tags[0]);
+            self.allocator.free(repo_tags);
+            self.allocator.destroy(img);
+        }
+
+        const arch = try self.allocator.dupe(u8, "amd64");
+        errdefer self.allocator.free(arch);
+
+        const os_name = try self.allocator.dupe(u8, "linux");
+        errdefer self.allocator.free(os_name);
 
         const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
-
-        var repo_tags = try self.allocator.alloc([]const u8, 1);
-        repo_tags[0] = try self.allocator.dupe(u8, target_tag);
 
         img.* = .{
             .id = full_id,
             .repo_tags = repo_tags,
             .repo_digests = &.{},
             .created = @intCast(now),
-            .architecture = try self.allocator.dupe(u8, "amd64"),
-            .os = try self.allocator.dupe(u8, "linux"),
+            .architecture = arch,
+            .os = os_name,
             .size = 1000,
             .rootfs = .{ .layers = &.{} },
             .config = .{
@@ -384,7 +416,7 @@ const overlay = @import("overlay.zig");
             },
         };
 
-        try self.saveImageToDisk(img);
+        self.saveImageToDisk(img) catch {};
         try self.by_id.put(img.id, img);
         try self.by_tag.put(img.repo_tags[0], img);
 
