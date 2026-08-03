@@ -293,31 +293,56 @@ pub fn wait(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
 }
 
 pub fn logs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
-    _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+    const content = daemon.containerLogs(name, alloc) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.ok(content);
 }
 
 pub fn stats(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
-    _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+    const report = daemon.containerStats(name, alloc) catch |err| {
+        return Response.fromError(err);
+    };
+
+    const json = std.json.Stringify.valueAlloc(alloc, report, .{}) catch "{}";
+    return Response.ok(json);
 }
 
 pub fn execCreate(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
-    _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+
+    const ExecConfig = struct {
+        Cmd: []const []const u8 = &.{},
+        Privileged: bool = false,
+        Tty: bool = false,
+    };
+
+    const parsed = std.json.parseFromSlice(ExecConfig, alloc, req.body, .{
+        .ignore_unknown_fields = true,
+    }) catch {
+        return Response.badRequest("invalid body");
+    };
+    defer parsed.deinit();
+
+    const exec_id = daemon.containerExecCreate(name, parsed.value.Cmd, parsed.value.Privileged, parsed.value.Tty, alloc) catch |err| {
+        return Response.fromError(err);
+    };
+
+    var buf: [128]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"Id\":\"{s}\"}}", .{exec_id}) catch "{}";
+    return Response.created(json);
 }
 
 pub fn execStart(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const exec_id = req.params.get("id") orelse return Response.badRequest("missing id");
+
+    daemon.containerExecStart(exec_id) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.noContent();
 }
 
 pub fn prune(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
