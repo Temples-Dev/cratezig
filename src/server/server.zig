@@ -45,7 +45,13 @@ fn handleConnection(ctx: *ConnContext) void {
     defer ctx.allocator.destroy(ctx);
     defer ctx.conn.close(ctx.daemon.config.io);
 
-    // Read the HTTP request
+    // Arena allocator: all per-request allocations are freed in one shot.
+    // No individual deinit calls needed for query maps, headers, handler data, etc.
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Read the HTTP request.
     var buf: [8192]u8 = undefined;
     var read_buf: [1024]u8 = undefined;
     var reader = ctx.conn.reader(ctx.daemon.config.io, &read_buf);
@@ -53,13 +59,11 @@ fn handleConnection(ctx: *ConnContext) void {
     if (n == 0) return;
     const raw = buf[0..n];
 
-    var req = parseRequest(raw, ctx.allocator) catch return;
-    defer req.deinit();
-
-    var res = router.dispatch(ctx.daemon, &req, ctx.allocator);
-    defer res.deinit();
+    var req = parseRequest(raw, alloc) catch return;
+    const res = router.dispatch(ctx.daemon, &req, alloc);
 
     writeResponse(ctx.daemon.config.io, ctx.conn, res) catch {};
+    // arena.deinit() frees everything above — req, res body, handler allocations.
 }
 
 fn writeResponse(io: std.Io, stream: std.Io.net.Stream, res: Response) !void {

@@ -1,24 +1,30 @@
 const std = @import("std");
 
+/// Path parameter store backed by a small inline array.
+/// Routes have at most 2 path parameters ({name}, {id}, etc.) so 8 slots is
+/// more than enough. Zero heap allocation — stored directly in the Request.
 pub const PathParams = struct {
-    map: std.StringHashMap([]const u8),
+    entries: [8]struct { key: []const u8, val: []const u8 } = undefined,
+    len: u8 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) PathParams {
-        return .{
-            .map = std.StringHashMap([]const u8).init(allocator),
-        };
+    pub fn init(_: std.mem.Allocator) PathParams {
+        return .{};
     }
 
-    pub fn deinit(self: *PathParams) void {
-        self.map.deinit();
-    }
+    pub fn deinit(_: *PathParams) void {}
 
-    pub fn put(self: *PathParams, key: []const u8, value: []const u8) !void {
-        try self.map.put(key, value);
+    pub fn put(self: *PathParams, key: []const u8, val: []const u8) !void {
+        if (self.len >= 8) return error.TooManyParams;
+        self.entries[self.len] = .{ .key = key, .val = val };
+        self.len += 1;
     }
 
     pub fn get(self: *const PathParams, key: []const u8) ?[]const u8 {
-        return self.map.get(key);
+        // Linear scan over ≤8 items: faster than a HashMap for small N.
+        for (self.entries[0..self.len]) |e| {
+            if (std.mem.eql(u8, e.key, key)) return e.val;
+        }
+        return null;
     }
 };
 
@@ -36,7 +42,7 @@ pub const Request = struct {
             .method = "",
             .path = "",
             .query = std.StringHashMap([]const u8).init(allocator),
-            .params = PathParams.init(allocator),
+            .params = PathParams{},
             .body = "",
             .headers = std.StringHashMap([]const u8).init(allocator),
             .allocator = allocator,
@@ -45,7 +51,6 @@ pub const Request = struct {
 
     pub fn deinit(self: *Request) void {
         self.query.deinit();
-        self.params.deinit();
         self.headers.deinit();
     }
 };
