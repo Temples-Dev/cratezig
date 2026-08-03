@@ -188,6 +188,252 @@ const overlay = @import("overlay.zig");
 
         return img;
     }
+
+    pub fn saveImageToDisk(self: *ImageService, img: *const Image) !void {
+        var hash = img.id;
+        if (std.mem.startsWith(u8, hash, "sha256:")) {
+            hash = hash[7..];
+        }
+        var path_buf: [512]u8 = undefined;
+        const img_path = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, hash });
+
+        const file = try std.Io.Dir.createFileAbsolute(self.config.io, img_path, .{});
+        defer file.close(self.config.io);
+
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(self.config.io, &write_buf);
+        var writer = &file_writer.interface;
+
+        try writer.writeAll("{");
+        try writer.print("\"Id\":\"{s}\",", .{img.id});
+        try writer.print("\"Created\":{d},", .{img.created});
+        try writer.print("\"Size\":{d},", .{img.size});
+        try writer.print("\"Architecture\":\"{s}\",", .{img.architecture});
+        try writer.print("\"Os\":\"{s}\",", .{img.os});
+
+        try writer.writeAll("\"RepoTags\":[");
+        for (img.repo_tags, 0..) |t, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.print("\"{s}\"", .{t});
+        }
+        try writer.writeAll("],");
+
+        try writer.writeAll("\"RepoDigests\":[");
+        for (img.repo_digests, 0..) |d, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.print("\"{s}\"", .{d});
+        }
+        try writer.writeAll("],");
+
+        try writer.writeAll("\"RootFS\":{\"Layers\":[");
+        for (img.rootfs.layers, 0..) |l, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.print("\"{s}\"", .{l});
+        }
+        try writer.writeAll("]}");
+        try writer.writeAll("}");
+    }
+
+    pub fn tagImage(self: *ImageService, name: []const u8, repo: []const u8, tag_val: []const u8) !void {
+        self.lock.lockSharedUncancelable(self.config.io);
+        const img = try self.getImage(name);
+        self.lock.unlockShared(self.config.io);
+
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        const new_tag = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ repo, tag_val });
+        errdefer self.allocator.free(new_tag);
+
+        for (img.repo_tags) |t| {
+            if (std.mem.eql(u8, t, new_tag)) {
+                self.allocator.free(new_tag);
+                return;
+            }
+        }
+
+        var new_tags = try self.allocator.alloc([]const u8, img.repo_tags.len + 1);
+        @memcpy(new_tags[0..img.repo_tags.len], img.repo_tags);
+        new_tags[img.repo_tags.len] = new_tag;
+
+        const old_tags = img.repo_tags;
+        img.repo_tags = new_tags;
+        
+        if (old_tags.len > 0) {
+            self.allocator.free(old_tags);
+        }
+
+        try self.saveImageToDisk(img);
+    }
+
+    pub fn removeImage(self: *ImageService, name: []const u8, force: bool, noprune: bool) ![]RemoveResponseItem {
+        _ = force;
+        _ = noprune;
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        var found_img: ?*Image = null;
+        var tag_to_remove: ?[]const u8 = null;
+
+        var tag_buf: [256]u8 = undefined;
+        const target_tag = if (std.mem.indexOfScalar(u8, name, ':') != null)
+            name
+        else
+            std.fmt.bufPrint(&tag_buf, "{s}:latest", .{name}) catch name;
+
+        var it = self.by_id.valueIterator();
+        while (it.next()) |img_ptr| {
+            for (img_ptr.*.repo_tags) |t| {
+                if (std.mem.eql(u8, t, target_tag)) {
+                    found_img = img_ptr.*;
+                    tag_to_remove = t;
+                    break;
+                }
+            }
+            if (found_img != null) break;
+        }
+
+        var is_id_match = false;
+        if (found_img == null) {
+            if (self.by_id.get(name)) |img| {
+                found_img = img;
+                is_id_match = true;
+            } else {
+                var prefix_match: ?*Image = null;
+                var it2 = self.by_id.iterator();
+                while (it2.next()) |entry| {
+                    if (std.mem.startsWith(u8, entry.key_ptr.*, name)) {
+                        if (prefix_match != null) return CrateError.ImageNotFound;
+                        prefix_match = entry.value_ptr.*;
+                    }
+                }
+                if (prefix_match) |img| {
+                    found_img = img;
+                    is_id_match = true;
+                }
+            }
+        }
+
+        const img = found_img orelse return CrateError.ImageNotFound;
+
+        var response = std.ArrayList(RemoveResponseItem).empty;
+        errdefer response.deinit(self.allocator);
+
+        if (is_id_match or img.repo_tags.len <= 1) {
+            for (img.repo_tags) |t| {
+                try response.append(self.allocator, .{ .untagged = try self.allocator.dupe(u8, t) });
+            }
+
+            var hash = img.id;
+            if (std.mem.startsWith(u8, hash, "sha256:")) {
+                hash = hash[7..];
+            }
+            var path_buf: [512]u8 = undefined;
+            const img_path = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, hash });
+            
+            std.Io.Dir.deleteFileAbsolute(self.config.io, img_path) catch |err| {
+                std.log.warn("failed to delete image file {s}: {}", .{ img_path, err });
+            };
+
+            _ = self.by_id.remove(img.id);
+
+            try response.append(self.allocator, .{ .deleted = try self.allocator.dupe(u8, img.id) });
+            
+            self.allocator.free(img.id);
+            for (img.repo_tags) |t| self.allocator.free(t);
+            self.allocator.free(img.repo_tags);
+            for (img.repo_digests) |d| self.allocator.free(d);
+            self.allocator.free(img.repo_digests);
+            self.allocator.destroy(img);
+        } else {
+            var new_tags = try self.allocator.alloc([]const u8, img.repo_tags.len - 1);
+            var idx: usize = 0;
+            for (img.repo_tags) |t| {
+                if (std.mem.eql(u8, t, tag_to_remove.?)) {
+                    try response.append(self.allocator, .{ .untagged = try self.allocator.dupe(u8, t) });
+                    self.allocator.free(t);
+                } else {
+                    new_tags[idx] = t;
+                    idx += 1;
+                }
+            }
+            const old_tags = img.repo_tags;
+            img.repo_tags = new_tags;
+            self.allocator.free(old_tags);
+
+            try self.saveImageToDisk(img);
+        }
+
+        return try response.toOwnedSlice(self.allocator);
+    }
+
+    pub fn pullImage(self: *ImageService, from_image: []const u8, tag_val: []const u8) !*Image {
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        var tag_buf: [256]u8 = undefined;
+        const target_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ from_image, tag_val });
+
+        var it = self.by_id.valueIterator();
+        while (it.next()) |img_ptr| {
+            for (img_ptr.*.repo_tags) |t| {
+                if (std.mem.eql(u8, t, target_tag)) return img_ptr.*;
+            }
+        }
+
+        var bytes: [32]u8 = undefined;
+        try self.config.io.randomSecure(&bytes);
+        var hex_buf: [64]u8 = undefined;
+        @memcpy(&hex_buf, std.fmt.bytesToHex(bytes, .lower)[0..64]);
+
+        const full_id = try std.fmt.allocPrint(self.allocator, "sha256:{s}", .{hex_buf});
+        errdefer self.allocator.free(full_id);
+
+        const img = try self.allocator.create(Image);
+        errdefer self.allocator.destroy(img);
+
+        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
+
+        var repo_tags = try self.allocator.alloc([]const u8, 1);
+        repo_tags[0] = try self.allocator.dupe(u8, target_tag);
+
+        img.* = .{
+            .id = full_id,
+            .repo_tags = repo_tags,
+            .repo_digests = &.{},
+            .created = @intCast(now),
+            .architecture = try self.allocator.dupe(u8, "amd64"),
+            .os = try self.allocator.dupe(u8, "linux"),
+            .size = 1000,
+            .rootfs = .{ .layers = &.{} },
+            .config = .{
+                .exposesd_ports = std.StringHashMap(void).init(self.allocator),
+            },
+        };
+
+        try self.saveImageToDisk(img);
+        try self.by_id.put(img.id, img);
+
+        return img;
+    }
+};
+
+pub const RemoveResponseItem = struct {
+    untagged: ?[]const u8 = null,
+    deleted: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: RemoveResponseItem, jws: anytype) !void {
+        try jws.beginObject();
+        if (self.untagged) |u| {
+            try jws.objectField("Untagged");
+            try jws.write(u);
+        }
+        if (self.deleted) |d| {
+            try jws.objectField("Deleted");
+            try jws.write(d);
+        }
+        try jws.endObject();
+    }
 };
 
 fn parseStringSlice(val: std.json.Value, allocator: std.mem.Allocator) ![][]const u8 {
