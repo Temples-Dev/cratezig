@@ -104,6 +104,25 @@ pub fn kill(io: std.Io, container_id: []const u8, signal: []const u8, allocator:
     }
 }
 
+pub fn pause(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !void {
+    const result = try runCmd(io, allocator, &.{ "runc", "pause", container_id });
+    defer result.deinit(allocator);
+
+    if (result.term != .exited or result.term.exited != 0) {
+        return error.RuntimeError;
+    }
+}
+
+pub fn unpause(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !void {
+    const result = try runCmd(io, allocator, &.{ "runc", "resume", container_id });
+    defer result.deinit(allocator);
+
+    if (result.term != .exited or result.term.exited != 0) {
+        return error.RuntimeError;
+    }
+}
+
+
 pub fn wait(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !i32 {
     while (true) {
         const state = getState(io, container_id, allocator) catch return 137;

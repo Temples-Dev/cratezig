@@ -77,4 +77,10 @@ pub const Daemon = struct {
     pub const containerStart = @import("start.zig").containerStart;
     pub const containerStop = @import("stop.zig").containerStop;
     pub const containerRemove = @import("remove.zig").containerRemove;
+    pub const containerRestart = @import("restart.zig").containerRestart;
+    pub const containerKill = @import("kill.zig").containerKill;
+    pub const containerPause = @import("pause.zig").containerPause;
+    pub const containerUnpause = @import("pause.zig").containerUnpause;
+    pub const containerWait = @import("wait.zig").containerWait;
+    pub const containerPrune = @import("prune.zig").containerPrune;
 };

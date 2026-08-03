@@ -237,38 +237,59 @@ pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
 
 // Stubs for remaining endpoints
 pub fn restart(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+    const t_str = req.query.get("t");
+    const timeout = if (t_str) |s| std.fmt.parseInt(u32, s, 10) catch null else null;
+
+    daemon.containerRestart(name, timeout) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.noContent();
 }
 
 pub fn kill(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+    const signal = req.query.get("signal");
+
+    daemon.containerKill(name, signal) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.noContent();
 }
 
 pub fn pause(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+
+    daemon.containerPause(name) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.noContent();
 }
 
 pub fn unpause(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+
+    daemon.containerUnpause(name) catch |err| {
+        return Response.fromError(err);
+    };
+    return Response.noContent();
 }
 
 pub fn wait(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
     _ = alloc;
-    return Response.internalError("not implemented");
+    const name = req.params.get("name") orelse return Response.badRequest("missing name");
+
+    const code = daemon.containerWait(name) catch |err| {
+        return Response.fromError(err);
+    };
+
+    var buf: [128]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"StatusCode\":{d}}}", .{code}) catch "{}";
+    return Response.ok(json);
 }
 
 pub fn logs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
@@ -300,8 +321,12 @@ pub fn execStart(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respo
 }
 
 pub fn prune(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
     _ = req;
-    _ = alloc;
-    return Response.internalError("not implemented");
+    const report = daemon.containerPrune(alloc) catch |err| {
+        return Response.fromError(err);
+    };
+
+    const json = std.json.Stringify.valueAlloc(alloc, report, .{}) catch "{}";
+    return Response.ok(json);
 }
+
