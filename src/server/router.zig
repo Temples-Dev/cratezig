@@ -9,6 +9,7 @@ const ih = @import("handlers/images.zig");
 const nh = @import("handlers/networks.zig");
 const vh = @import("handlers/volumes.zig");
 const sh = @import("handlers/system.zig");
+const bh = @import("handlers/build.zig");
 
 const Handler = *const fn (daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response;
 
@@ -26,6 +27,7 @@ const ROUTES = [_]Route{
     .{ .method = "GET", .pattern = "/info", .handler = sh.info },
     .{ .method = "GET", .pattern = "/events", .handler = sh.events },
     .{ .method = "GET", .pattern = "/df", .handler = sh.diskUsage },
+    .{ .method = "POST", .pattern = "/build", .handler = bh.build },
 
     // ── Containers ───────────────────────────────────────────────────────────
     .{ .method = "GET", .pattern = "/containers/json", .handler = ch.list },

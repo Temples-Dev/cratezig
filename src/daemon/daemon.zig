@@ -5,6 +5,7 @@ const Events = @import("../events/events.zig").Events;
 const ImageService = @import("../image/service.zig").ImageService;
 const NetController = @import("../network/controller.zig").NetworkController;
 const VolumeService = @import("../volume/service.zig").VolumeService;
+const Builder = @import("../builder/builder.zig").Builder;
 
 pub const Daemon = struct {
     allocator: std.mem.Allocator,
@@ -27,16 +28,24 @@ pub const Daemon = struct {
     /// Volume operations (create/mount/unmount)
     volumes: VolumeService,
 
+    /// Image Builder service
+    builder: Builder,
+
     pub fn init(allocator: std.mem.Allocator, config: Config) !Daemon {
+        var images_svc = try ImageService.init(allocator, config);
+        errdefer images_svc.deinit();
+
         var d = Daemon{
             .allocator = allocator,
             .config = config,
             .containers = ContainerStore.init(allocator, config.io),
             .events = Events.init(allocator, config.io),
-            .images = try ImageService.init(allocator, config),
+            .images = images_svc,
             .network = try NetController.init(allocator, config),
             .volumes = try VolumeService.init(allocator, config),
+            .builder = undefined,
         };
+        d.builder = Builder.init(allocator, config, &d.images);
 
         // Step 1: Create data directories
         try d.setupDataDirectories();
@@ -51,6 +60,7 @@ pub const Daemon = struct {
     }
 
     pub fn deinit(self: *Daemon) void {
+        self.builder.deinit();
         self.containers.deinit();
         self.events.deinit();
         self.images.deinit();
