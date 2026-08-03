@@ -6,7 +6,7 @@ pub const VolumeService = struct {
     allocator: std.mem.Allocator,
     config: DaemonConfig,
     by_name: std.StringHashMap(*Volume),
-    lock: std.Io.RwLock = .{},
+    lock: std.Io.RwLock = .init,
 
     pub fn init(allocator: std.mem.Allocator, config: DaemonConfig) !VolumeService {
         var svc = VolumeService{
@@ -23,19 +23,19 @@ pub const VolumeService = struct {
     }
 
     pub fn get(self: *VolumeService, name: []const u8) ?*Volume {
-        self.lock.lockShared(self.config.io);
+        self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
         return self.by_name.get(name);
     }
 
     pub fn list(self: *VolumeService, allocator: std.mem.Allocator) ![]*Volume {
-        self.lock.lockShared(self.config.io);
+        self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
 
         var result = try std.ArrayList(*Volume).initCapacity(allocator, self.by_name.count());
         var it = self.by_name.valueIterator();
         while (it.next()) |vol| result.appendAssumeCapacity(vol.*);
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(allocator);
     }
 
     fn loadFromDisk(self: *VolumeService) !void {
@@ -43,7 +43,7 @@ pub const VolumeService = struct {
         const volumes_dir = try std.fmt.bufPrint(&path_buf, "{s}/volumes", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.config.io, volumes_dir, .{ .iterate = true }) catch |err| {
-            if (err == std.Io.Dir.OpenError.FileNotFound) return;
+            if (err == error.FileNotFound) return;
             return err;
         };
         defer dir.close(self.config.io);
@@ -84,7 +84,8 @@ pub const VolumeService = struct {
         defer file.close(self.config.io);
 
         var read_buf: [4096]u8 = undefined;
-        const content = file.reader(self.config.io, &read_buf).readAllAlloc(self.allocator, 1 * 1024 * 1024) catch return vol;
+        var file_reader = file.reader(self.config.io, &read_buf);
+        const content = file_reader.interface.allocRemaining(self.allocator, std.Io.Limit.limited(1 * 1024 * 1024)) catch return vol;
         defer self.allocator.free(content);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, content, .{}) catch return vol;

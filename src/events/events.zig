@@ -52,8 +52,8 @@ fn RingQueue(comptime T: type, comptime capacity: usize) type {
 pub const Subscriber = struct {
     io: std.Io,
     queue: RingQueue(Event, 64) = .{},
-    mutex: std.Io.Mutex = .{},
-    cond: std.Io.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
     closed: bool = false,
 
     pub fn init(io: std.Io) Subscriber {
@@ -61,7 +61,7 @@ pub const Subscriber = struct {
     }
 
     pub fn receive(self: *Subscriber) ?Event {
-        self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         while (self.queue.isEmpty() and !self.closed) {
@@ -72,7 +72,7 @@ pub const Subscriber = struct {
     }
 
     pub fn close(self: *Subscriber) void {
-        self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         self.closed = true;
         self.cond.broadcast(self.io);
         self.mutex.unlock(self.io);
@@ -82,7 +82,7 @@ pub const Subscriber = struct {
 pub const Events = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
 
     ring: [256]Event = undefined,
     ring_head: usize = 0,
@@ -94,16 +94,16 @@ pub const Events = struct {
         return .{
             .io = io,
             .allocator = allocator,
-            .subscribers = std.ArrayList(*Subscriber).init(allocator),
+            .subscribers = std.ArrayList(*Subscriber).empty,
         };
     }
 
     pub fn deinit(self: *Events) void {
-        self.subscribers.deinit();
+        self.subscribers.deinit(self.allocator);
     }
 
     pub fn publish(self: *Events, event: Event) void {
-        self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         self.ring[self.ring_head % 256] = event;
@@ -111,7 +111,7 @@ pub const Events = struct {
         if (self.ring_count < 256) self.ring_count += 1;
 
         for (self.subscribers.items) |sub| {
-            sub.mutex.lock(sub.io);
+            sub.mutex.lockUncancelable(sub.io);
             sub.queue.push(event) catch {};
             sub.cond.signal(sub.io);
             sub.mutex.unlock(sub.io);
@@ -122,15 +122,15 @@ pub const Events = struct {
         const sub = try self.allocator.create(Subscriber);
         sub.* = Subscriber.init(self.io);
 
-        self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        try self.subscribers.append(sub);
+        try self.subscribers.append(self.allocator, sub);
 
         return sub;
     }
 
     pub fn unsubscribe(self: *Events, sub: *Subscriber) void {
-        self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         for (self.subscribers.items, 0..) |s, i| {

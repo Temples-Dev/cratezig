@@ -20,7 +20,7 @@ pub const CreateResponse = struct {
     warnings: [][]const u8,
 };
 
-pub fn ContainerCreate(daemon: *Daemon, params: CreateConfig, allocator: std.mem.Allocator) !CreateResponse {
+pub fn containerCreate(daemon: *Daemon, params: CreateConfig, allocator: std.mem.Allocator) !CreateResponse {
     const image = try daemon.images.getImage(params.config.image);
 
     if (params.config.cmd.len == 0 and image.config.cmd.len == 0 and
@@ -30,10 +30,10 @@ pub fn ContainerCreate(daemon: *Daemon, params: CreateConfig, allocator: std.mem
     }
 
     var id: [64]u8 = undefined;
-    generateRandomHexID(&id);
+    try generateRandomHexID(daemon.config.io, &id);
 
     var name_buf: [64]u8 = undefined;
-    const name = params.name orelse generateRandomName(&name_buf);
+    const name = params.name orelse try generateRandomName(daemon.config.io, &name_buf);
 
     if (daemon.containers.get(name) != null) {
         return CrateError.ContainerNameInUse;
@@ -51,7 +51,7 @@ pub fn ContainerCreate(daemon: *Daemon, params: CreateConfig, allocator: std.mem
         .id = id,
         .id_short = id[0..12].*,
         .name = try allocator.dupe(u8, name),
-        .created_at = now,
+        .created_at = @intCast(now),
         .config = merged_config,
         .host_config = params.host_config,
         .image_id = try allocator.dupe(u8, image.id),
@@ -82,15 +82,16 @@ pub fn ContainerCreate(daemon: *Daemon, params: CreateConfig, allocator: std.mem
     };
 }
 
-fn generateRandomHexID(out: *[64]u8) void {
+fn generateRandomHexID(io: std.Io, out: *[64]u8) !void {
     var bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
-    _ = std.fmt.bufPrint(out, "{}", .{std.fmt.fmtSliceHexLower(&bytes)}) catch unreachable;
+    try io.randomSecure(&bytes);
+    const hex = std.fmt.bytesToHex(bytes, .lower);
+    @memcpy(out, &hex);
 }
 
-fn generateRandomName(buf: *[64]u8) []u8 {
+fn generateRandomName(io: std.Io, buf: *[64]u8) ![]u8 {
     var bytes: [4]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    try io.randomSecure(&bytes);
     const n = std.mem.readInt(u32, &bytes, .little);
     return std.fmt.bufPrint(buf, "/container_{d}", .{n}) catch unreachable;
 }

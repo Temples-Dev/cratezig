@@ -67,9 +67,14 @@ pub const Daemon = struct {
         for (dirs) |suffix| {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.config.data_root, suffix });
-            std.Io.Dir.createDirAbsolute(self.config.io, path, .{}) catch |err| {
-                if (err != std.Io.Dir.ReadFileError) return err;
+            std.Io.Dir.createDirAbsolute(self.config.io, path, .default_dir) catch |err| {
+                if (err != error.PathAlreadyExists) return err;
             };
         }
     }
+
+    pub const containerCreate = @import("create.zig").containerCreate;
+    pub const containerStart = @import("start.zig").containerStart;
+    pub const containerStop = @import("stop.zig").containerStop;
+    pub const containerRemove = @import("remove.zig").containerRemove;
 };

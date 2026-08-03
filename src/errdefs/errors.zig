@@ -33,7 +33,6 @@ pub fn httpStatus(err: Error) u16 {
     return switch (err) {
         .ContainerAlreadyRunning => 304,
         .ContainerNotFound, .ImageNotFound, .NetworkNotFound, .VolumeNotFound, .ExecNotFound => 404,
-        .ContainerAlreadyRunning,
         .ContainerNotRunning,
         .ContainerBeingRemoved,
         .ContainerNameInUse,

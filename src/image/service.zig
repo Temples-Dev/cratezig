@@ -14,7 +14,7 @@ pub const ImageService = struct {
     allocator: std.mem.Allocator,
     config: DaemonConfig,
     by_id: std.StringHashMap(*Image),
-    lock: std.Io.RwLock = .{},
+    lock: std.Io.RwLock = .init,
 
     pub fn init(allocator: std.mem.Allocator, config: DaemonConfig) !ImageService {
         var svc = ImageService{
@@ -31,7 +31,7 @@ pub const ImageService = struct {
     }
 
     pub fn get(self: *ImageService, id: []const u8) ?*Image {
-        self.lock.lockShared(self.config.io);
+        self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
         return self.by_id.get(id);
     }
@@ -39,7 +39,7 @@ pub const ImageService = struct {
     /// Resolves an image by full ID, short-ID prefix, or repo tag.
     /// Appends ":latest" when the tag string contains no colon.
     pub fn getImage(self: *ImageService, id_or_tag: []const u8) !*Image {
-        self.lock.lockShared(self.config.io);
+        self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
 
         if (self.by_id.get(id_or_tag)) |img| return img;
@@ -74,19 +74,21 @@ pub const ImageService = struct {
         return CrateError.ImageNotFound;
     }
 
+const overlay = @import("overlay.zig");
+
     /// Creates an overlay2 writable layer for a container.
     /// Produces: overlay2/{id}/{diff,work}/ and overlay2/{id}/lower.
     pub fn createWritableLayer(self: *ImageService, id: *const [64]u8, image_id: []const u8) !void {
         var layer_buf: [512]u8 = undefined;
         const layer_path = try std.fmt.bufPrint(&layer_buf, "{s}/overlay2/{s}", .{ self.config.data_root, id });
 
-        try std.Io.Dir.createDirAbsolute(self.config.io, layer_path, .{});
+        try std.Io.Dir.createDirAbsolute(self.config.io, layer_path, .default_dir);
 
         var diff_buf: [530]u8 = undefined;
-        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&diff_buf, "{s}/diff", .{layer_path}), .{});
+        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&diff_buf, "{s}/diff", .{layer_path}), .default_dir);
 
         var work_buf: [530]u8 = undefined;
-        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&work_buf, "{s}/work", .{layer_path}), .{});
+        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&work_buf, "{s}/work", .{layer_path}), .default_dir);
 
         var lower_path_buf: [530]u8 = undefined;
         const lower_path = try std.fmt.bufPrint(&lower_path_buf, "{s}/lower", .{layer_path});
@@ -95,17 +97,26 @@ pub const ImageService = struct {
         defer lower_file.close(self.config.io);
 
         var write_buf: [128]u8 = undefined;
-        try lower_file.writer(self.config.io, &write_buf).writeAll(image_id);
+        var lower_writer = lower_file.writer(self.config.io, &write_buf);
+        try lower_writer.interface.writeAll(image_id);
+    }
+
+    pub fn mountWritableLayer(self: *ImageService, id: []const u8) !void {
+        try overlay.mount(self.config.io, self.config.data_root, id, self.allocator);
+    }
+
+    pub fn unmountWritableLayer(self: *ImageService, id: []const u8) !void {
+        try overlay.unmount(self.config.io, self.config.data_root, id, self.allocator);
     }
 
     pub fn list(self: *ImageService, allocator: std.mem.Allocator) ![]*Image {
-        self.lock.lockShared(self.config.io);
+        self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
 
         var result = try std.ArrayList(*Image).initCapacity(allocator, self.by_id.count());
         var it = self.by_id.valueIterator();
         while (it.next()) |img| result.appendAssumeCapacity(img.*);
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(allocator);
     }
 
     fn loadFromDisk(self: *ImageService) !void {
@@ -113,7 +124,7 @@ pub const ImageService = struct {
         const images_dir = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.config.io, images_dir, .{ .iterate = true }) catch |err| {
-            if (err == std.Io.Dir.OpenError.FileNotFound) return;
+            if (err == error.FileNotFound) return;
             return err;
         };
         defer dir.close(self.config.io);
@@ -139,7 +150,8 @@ pub const ImageService = struct {
         defer file.close(self.config.io);
 
         var read_buf: [4096]u8 = undefined;
-        const content = try file.reader(self.config.io, &read_buf).readAllAlloc(self.allocator, 10 * 1024 * 1024);
+        var file_reader = file.reader(self.config.io, &read_buf);
+        const content = try file_reader.interface.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024));
         defer self.allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});

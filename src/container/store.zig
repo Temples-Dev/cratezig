@@ -13,7 +13,7 @@ pub const ContainerStore = struct {
 
     allocator: std.mem.Allocator,
 
-    lock: std.Io.RwLock = .{},
+    lock: std.Io.RwLock = .init,
 
     by_id: std.StringHashMap(*Container),
 
@@ -34,7 +34,7 @@ pub const ContainerStore = struct {
     }
 
     pub fn add(self: *ContainerStore, ctr: *Container) !void {
-        self.lock.lock(self.io);
+        self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
 
         const id = ctr.id[0..];
@@ -43,7 +43,7 @@ pub const ContainerStore = struct {
     }
 
     pub fn get(self: *ContainerStore, id_or_prefix: []const u8) ?*Container {
-        self.lock.lockShared(self.io);
+        self.lock.lockSharedUncancelable(self.io);
         defer self.lock.unlockShared(self.io);
 
         if (self.by_id.get(id_or_prefix)) |ctr| return ctr;
@@ -65,7 +65,7 @@ pub const ContainerStore = struct {
     }
 
     pub fn delete(self: *ContainerStore, id: []const u8) void {
-        self.lock.lock(self.io);
+        self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
 
         if (self.by_id.fetchRemove(id)) |entry| {
@@ -74,14 +74,14 @@ pub const ContainerStore = struct {
     }
 
     pub fn list(self: *ContainerStore, allocator: std.mem.Allocator) ![]*Container {
-        self.lock.lockShared(self.io);
+        self.lock.lockSharedUncancelable(self.io);
         defer self.lock.unlockShared(self.io);
 
         var result = try std.ArrayList(*Container).initCapacity(allocator, self.by_id.count());
 
         var it = self.by_id.valueIterator();
         while (it.next()) |ctr| result.appendAssumeCapacity(ctr.*);
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(allocator);
     }
 
     pub fn loadFromDisk(self: *ContainerStore, data_root: []const u8, allocator: std.mem.Allocator) !void {
@@ -89,7 +89,7 @@ pub const ContainerStore = struct {
         const containers_dir = try std.fmt.bufPrint(&path_buf, "{s}/containers", .{data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, containers_dir, .{ .iterate = true }) catch |err| {
-            if (err == std.Io.Dir.OpenError) return;
+            if (err == error.FileNotFound) return;
             return err;
         };
 
@@ -123,7 +123,8 @@ fn loadContainerFromFile(io: std.Io, path: []const u8, allocator: std.mem.Alloca
     defer file.close(io);
 
     var read_buf: [4096]u8 = undefined;
-    const content = try file.reader(io, &read_buf).readAllAlloc(allocator, 10 * 1024 * 1024);
+    var file_reader = file.reader(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, std.Io.Limit.limited(10 * 1024 * 1024));
     defer allocator.free(content);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
@@ -139,7 +140,7 @@ fn loadContainerFromFile(io: std.Io, path: []const u8, allocator: std.mem.Alloca
     errdefer allocator.destroy(ctr);
 
     ctr.io = io;
-    ctr.mutex = .{};
+    ctr.mutex = .init;
 
     // ID
     const id_val = root.get("ID") orelse root.get("Id") orelse return LoadError.MissingId;
