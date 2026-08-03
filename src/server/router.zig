@@ -83,7 +83,7 @@ pub fn dispatch(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respon
     }
 
     for (ROUTES) |route| {
-        if (comptime std.mem.indexOfScalar(u8, route.pattern, '{') != null) {
+        if (std.mem.indexOfScalar(u8, route.pattern, '{') != null) {
             if (std.mem.eql(u8, route.method, req.method)) {
                 var tmp_params = PathParams{};
                 if (matchPattern(route.pattern, path, &tmp_params)) {

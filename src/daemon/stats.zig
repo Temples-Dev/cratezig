@@ -114,11 +114,11 @@ fn readCgroupFile(io: std.Io, path: []const u8) ?u64 {
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
 
+    var read_buf: [64]u8 = undefined;
     var buf: [64]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    var line_buf: [64]u8 = undefined;
-    const line = reader.interface.takeUntilDelimiter(&line_buf, '\n') catch return null;
-    const trimmed = std.mem.trim(u8, line, " \r\n");
+    var reader = file.reader(io, &read_buf);
+    const n = reader.interface.readSliceShort(&buf) catch return null;
+    const trimmed = std.mem.trim(u8, buf[0..n], " \r\n");
     return std.fmt.parseInt(u64, trimmed, 10) catch null;
 }
 
@@ -127,11 +127,13 @@ fn readCgroupCpu(io: std.Io, path: []const u8) ?u64 {
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
 
-    var buf: [256]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    var line_buf: [128]u8 = undefined;
+    var read_buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    const n = reader.interface.readSliceShort(&buf) catch return null;
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
 
-    while (reader.interface.takeUntilDelimiter(&line_buf, '\n')) |line| {
+    while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "usage_usec")) {
             var it = std.mem.tokenizeAny(u8, line, " \t");
             _ = it.next();
@@ -140,6 +142,6 @@ fn readCgroupCpu(io: std.Io, path: []const u8) ?u64 {
                 return usec * 1000;
             }
         }
-    } else |_| {}
+    }
     return null;
 }

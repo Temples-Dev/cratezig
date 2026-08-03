@@ -1,6 +1,6 @@
 const std = @import("std");
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
-const Image = @import("types.zig").Image;
+pub const Image = @import("types.zig").Image;
 const ImageConfig = @import("types.zig").ImageConfig;
 const RootFS = @import("types.zig").RootFS;
 const CrateError = @import("../errdefs/errors.zig").Error;
