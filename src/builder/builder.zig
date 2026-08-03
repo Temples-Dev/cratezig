@@ -184,3 +184,63 @@ test "experiment on real GEase backend Dockerfile" {
     std.debug.print("Warm build duration (cache hit): {d} ms\n", .{duration_warm_ms});
     std.debug.print("======================================\n", .{});
 }
+
+test "experiment on Moby Dockerfile.simple and full Dockerfile" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var cfg = DaemonConfig.init(io);
+    cfg.data_root = "/tmp/cratezig-moby-test";
+
+    var image_service = try ImageService.init(alloc, cfg);
+    defer image_service.deinit();
+
+    var builder = Builder.init(alloc, cfg, &image_service);
+    defer builder.deinit();
+
+    // 1. Dockerfile.simple
+    if (std.Io.Dir.openFileAbsolute(io, "/home/life-mac-africa/Work/moby/Dockerfile.simple", .{})) |file_simple| {
+        defer file_simple.close(io);
+
+        var read_buf: [2048]u8 = undefined;
+        var reader = file_simple.reader(io, &read_buf);
+        var content_buf: [4096]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&content_buf);
+        const simple_content = content_buf[0..n];
+
+        var df_simple = try Dockerfile.parse(alloc, simple_content);
+        defer df_simple.deinit();
+
+        const start_simple = std.Io.Clock.now(.awake, io).toNanoseconds();
+        const img_simple = try builder.build(simple_content, "/home/life-mac-africa/Work/moby", "moby:simple");
+        const dur_simple_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_simple, 1000000);
+
+        std.debug.print("\n=== Moby Dockerfile.simple Benchmark ===\n", .{});
+        std.debug.print("Parsed instructions: {d}\n", .{df_simple.instructions.len});
+        std.debug.print("Build duration: {d} ms (Image ID: {s})\n", .{ dur_simple_ms, img_simple.id });
+        std.debug.print("=========================================\n", .{});
+    } else |_| {}
+
+    // 2. Full 646-line Dockerfile
+    if (std.Io.Dir.openFileAbsolute(io, "/home/life-mac-africa/Work/moby/Dockerfile", .{})) |file_full| {
+        defer file_full.close(io);
+
+        var read_buf: [4096]u8 = undefined;
+        var reader = file_full.reader(io, &read_buf);
+        var content_buf: [32768]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&content_buf);
+        const full_content = content_buf[0..n];
+
+        var df_full = try Dockerfile.parse(alloc, full_content);
+        defer df_full.deinit();
+
+        const start_full = std.Io.Clock.now(.awake, io).toNanoseconds();
+        const img_full = try builder.build(full_content, "/home/life-mac-africa/Work/moby", "moby:full");
+        const dur_full_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_full, 1000000);
+
+        std.debug.print("\n=== Moby Full Dockerfile (646 lines) Benchmark ===\n", .{});
+        std.debug.print("Parsed instructions: {d}\n", .{df_full.instructions.len});
+        std.debug.print("Build duration: {d} ms (Image ID: {s})\n", .{ dur_full_ms, img_full.id });
+        std.debug.print("===================================================\n", .{});
+    } else |_| {}
+}
