@@ -45,7 +45,7 @@ pub const DaemonConfig = struct {
     // Registry
     insecure_registries: []const []const u8 = &.{},
 
-    registry_mirrors: []const []const u8,
+    registry_mirrors: []const []const u8 = &.{},
 
     // Path helpers
     //
@@ -88,12 +88,48 @@ pub const DaemonConfig = struct {
         defer file.close(self.io);
 
         var read_buf: [4096]u8 = undefined;
-        const content = try file.reader(self.io, &read_buf).readAllAlloc(allocator, 1024 * 1024);
+        var file_reader = file.reader(self.io, &read_buf);
+        const content = try file_reader.interface.allocRemaining(allocator, std.Io.Limit.limited(1024 * 1024));
         defer allocator.free(content);
 
-        const parsed = try std.json.parseFromSlice(DaemonConfig, allocator, content, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
+        const JsonConfig = struct {
+            data_root: []const u8 = "/var/lib/docker",
+            storage_driver: []const u8 = "overlay2",
+            default_bridge: bool = true,
+            bridge_ip: []const u8 = "172.17.0.1/16",
+            ip_forward: bool = true,
+            ip_tables: bool = true,
+            userland_proxy: bool = true,
+            dns: []const []const u8 = &.{},
+            log_driver: []const u8 = "json-file",
+            selinux_runtime: bool = false,
+            default_runtime: []const u8 = "runc",
+            runc_path: []const u8 = "/usr/bin/runc",
+            shutdown_timeout: u32 = 15,
+            insecure_registries: []const []const u8 = &.{},
+            registry_mirrors: []const []const u8 = &.{},
+        };
 
-        return parsed.value;
+        const parsed = try std.json.parseFromSlice(JsonConfig, allocator, content, .{ .ignore_unknown_fields = true });
+        // We do not call parsed.deinit() so that string fields allocated within the parsed JSON remain valid.
+
+        return DaemonConfig{
+            .io = self.io,
+            .data_root = parsed.value.data_root,
+            .storage_driver = parsed.value.storage_driver,
+            .default_bridge = parsed.value.default_bridge,
+            .bridge_ip = parsed.value.bridge_ip,
+            .ip_forward = parsed.value.ip_forward,
+            .ip_tables = parsed.value.ip_tables,
+            .userland_proxy = parsed.value.userland_proxy,
+            .dns = parsed.value.dns,
+            .log_driver = parsed.value.log_driver,
+            .selinux_runtime = parsed.value.selinux_runtime,
+            .default_runtime = parsed.value.default_runtime,
+            .runc_path = parsed.value.runc_path,
+            .shutdown_timeout = parsed.value.shutdown_timeout,
+            .insecure_registries = parsed.value.insecure_registries,
+            .registry_mirrors = parsed.value.registry_mirrors,
+        };
     }
 };
