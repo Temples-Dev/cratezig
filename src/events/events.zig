@@ -15,6 +15,40 @@ pub const Event = struct {
     actor_id: []const u8,
     actor_attrs: std.StringHashMap([]const u8),
     time_nano: i128,
+
+    pub fn jsonStringify(self: Event, jws: anytype) !void {
+        try jws.beginObject();
+        try jws.objectField("Type");
+        try jws.write(@tagName(self.event_type));
+        try jws.objectField("Action");
+        try jws.write(self.action);
+        
+        try jws.objectField("Actor");
+        try jws.beginObject();
+        try jws.objectField("ID");
+        try jws.write(self.actor_id);
+        try jws.objectField("Attributes");
+        try jws.beginObject();
+        var it = self.actor_attrs.iterator();
+        while (it.next()) |entry| {
+            try jws.objectField(entry.key_ptr.*);
+            try jws.write(entry.value_ptr.*);
+        }
+        try jws.endObject();
+        try jws.endObject();
+
+        const sec: i64 = @intCast(@divTrunc(self.time_nano, 1_000_000_000));
+        try jws.objectField("time");
+        try jws.write(sec);
+
+        try jws.objectField("timeNano");
+        try jws.write(@as(i64, @intCast(self.time_nano)));
+
+        try jws.objectField("scope");
+        try jws.write("local");
+
+        try jws.endObject();
+    }
 };
 
 fn RingQueue(comptime T: type, comptime capacity: usize) type {
@@ -127,6 +161,22 @@ pub const Events = struct {
         try self.subscribers.append(self.allocator, sub);
 
         return sub;
+    }
+
+    pub fn getEvents(self: *Events, allocator: std.mem.Allocator) ![]Event {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        var list = try std.ArrayList(Event).initCapacity(allocator, self.ring_count);
+        errdefer list.deinit(allocator);
+
+        var i: usize = 0;
+        while (i < self.ring_count) : (i += 1) {
+            const index = if (self.ring_count < 256) i else (self.ring_head + i - self.ring_count) % 256;
+            try list.append(allocator, self.ring[index]);
+        }
+
+        return try list.toOwnedSlice(allocator);
     }
 
     pub fn unsubscribe(self: *Events, sub: *Subscriber) void {
