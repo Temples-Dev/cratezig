@@ -109,7 +109,7 @@ pub fn mount(io: std.Io, data_root: []const u8, container_id: []const u8, alloca
 
     // Expand l/ symlinks to full paths
     var lower_full_buf: [4096]u8 = undefined;
-    const lower_full = try expandLowerPaths(data_root, lower, &lower_full_buf, allocator);
+    const lower_full = try expandLowerPaths(data_root, lower, &lower_full_buf);
 
     const upper = try std.fmt.bufPrint(&buf, "{s}/overlay2/{s}/diff", .{ data_root, container_id });
     const work = try std.fmt.bufPrint(&buf, "{s}/overlay2/{s}/work", .{ data_root, container_id });
@@ -138,27 +138,25 @@ fn generateShortName(out: *[26]u8) void {
     for (out) |*c| c.* = chars[rng.random().intRangeLessThan(u8, 0, chars.len)];
 }
 
-fn expandLowerPaths(data_root: []const u8, lower: []const u8, buf: []u8, allocator: std.mem.Allocator) ![]u8 {
+fn expandLowerPaths(data_root: []const u8, lower: []const u8, buf: []u8) ![]u8 {
+    // Write directly into the caller's stack buffer — no heap allocation.
     // "l/ABCD:l/EFGH" → "{data_root}/overlay2/l/ABCD:{data_root}/overlay2/l/EFGH"
-    var result = std.ArrayList(u8).empty;
-    defer result.deinit(allocator);
-
+    var pos: usize = 0;
     var it = std.mem.splitScalar(u8, lower, ':');
     var first = true;
     while (it.next()) |segment| {
-        // Strip carriage returns or newlines if any
         const clean_seg = std.mem.trim(u8, segment, " \r\n");
         if (clean_seg.len == 0) continue;
-        if (!first) try result.append(allocator, ':');
-        
-        var alloc_writer = std.Io.Writer.Allocating.fromArrayList(allocator, &result);
-        try alloc_writer.writer.print("{s}/overlay2/{s}", .{ data_root, clean_seg });
-        result = alloc_writer.toArrayList();
+        if (!first) {
+            if (pos >= buf.len) return error.NoSpaceLeft;
+            buf[pos] = ':';
+            pos += 1;
+        }
+        const written = try std.fmt.bufPrint(buf[pos..], "{s}/overlay2/{s}", .{ data_root, clean_seg });
+        pos += written.len;
         first = false;
     }
-    const s = result.items;
-    @memcpy(buf[0..s.len], s);
-    return buf[0..s.len];
+    return buf[0..pos];
 }
 
 fn runCmd(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) !void {
