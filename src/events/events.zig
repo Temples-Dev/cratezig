@@ -137,14 +137,19 @@ pub const Events = struct {
     }
 
     pub fn publish(self: *Events, event: Event) void {
+        // Hold the global lock only for the ring write — O(1).
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
         self.ring[self.ring_head % 256] = event;
         self.ring_head +%= 1;
         if (self.ring_count < 256) self.ring_count += 1;
+        // Snapshot the subscriber slice before releasing the lock.
+        // The slice header is a fat pointer copy — safe without the lock.
+        const subs = self.subscribers.items;
+        self.mutex.unlock(self.io);
 
-        for (self.subscribers.items) |sub| {
+        // Deliver to each subscriber without holding the global lock.
+        // Each subscriber protects its own queue with its own mutex.
+        for (subs) |sub| {
             sub.mutex.lockUncancelable(sub.io);
             sub.queue.push(event) catch {};
             sub.cond.signal(sub.io);
