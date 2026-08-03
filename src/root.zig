@@ -17,4 +17,5 @@ test "compilation check" {
     _ = @import("server/handlers/system.zig");
     _ = @import("builder/dockerfile.zig");
     _ = @import("builder/cache.zig");
+    _ = @import("builder/context.zig");
 }
