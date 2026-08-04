@@ -32,4 +32,6 @@ test "compilation check" {
     _ = @import("vpm/seccomp.zig");
     _ = @import("vpm/manager.zig");
     _ = @import("server/handlers/system.zig");
+    _ = @import("image/push.zig");
+    _ = @import("network/bridge.zig");
 }
