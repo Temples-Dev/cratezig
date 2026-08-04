@@ -143,7 +143,7 @@ pub const NetworkController = struct {
         const net_dir = try std.fmt.bufPrint(&path_buf, "{s}/network/files", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.config.io, net_dir, .{ .iterate = true }) catch |err| {
-            if (err == std.Io.Dir.OpenError.FileNotFound) return;
+            if (err == std.Io.Dir.OpenError.FileNotFound or err == std.Io.Dir.OpenError.AccessDenied) return;
             return err;
         };
         defer dir.close(self.config.io);

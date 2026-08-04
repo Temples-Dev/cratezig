@@ -20,6 +20,16 @@ pub fn main() !void {
 
     std.log.info("Docker daemon started (data-root: {s})", .{cfg.data_root});
 
-    var server = Server.init(&daemon, "/var/run/docker.sock", alloc);
-    try server.listen();
+    const socket_path: []const u8 = "/var/run/docker.sock";
+
+    var server = Server.init(&daemon, socket_path, alloc);
+    server.listen() catch |err| {
+        if (err == error.AccessDenied or err == error.PermissionDenied or err == error.AddressInUse) {
+            std.log.info("System socket in use or restricted. Falling back to /tmp/cratezig.sock...", .{});
+            server.socket_path = "/tmp/cratezig.sock";
+            try server.listen();
+        } else {
+            return err;
+        }
+    };
 }

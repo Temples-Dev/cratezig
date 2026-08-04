@@ -111,7 +111,7 @@ pub const ContainerStore = struct {
         const containers_dir = try std.fmt.bufPrint(&path_buf, "{s}/containers", .{data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, containers_dir, .{ .iterate = true }) catch |err| {
-            if (err == error.FileNotFound) return;
+            if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
 

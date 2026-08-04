@@ -6,6 +6,22 @@ pub const BridgeConfig = struct {
     gateway: []const u8 = "172.18.0.1",
 };
 
+pub fn setupBridge(io: anytype) !void {
+    _ = io;
+}
+
+pub fn connectContainer(io: anytype, container_id: []const u8, pid: u32, ip: []const u8) !void {
+    _ = io;
+    _ = container_id;
+    _ = pid;
+    _ = ip;
+}
+
+pub fn disconnectContainer(io: anytype, container_id: []const u8) !void {
+    _ = io;
+    _ = container_id;
+}
+
 pub const BridgeManager = struct {
     allocator: std.mem.Allocator,
 

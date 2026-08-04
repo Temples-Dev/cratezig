@@ -14,8 +14,10 @@ pub const Server = struct {
     }
 
     pub fn listen(self: *Server) !void {
-        // Remove old socket file if it exists
-        std.Io.Dir.deleteFileAbsolute(self.daemon.config.io, self.socket_path) catch {};
+        var path_buf: [256:0]u8 = undefined;
+        if (std.fmt.bufPrintZ(&path_buf, "{s}", .{self.socket_path})) |pathZ| {
+            _ = std.os.linux.unlink(pathZ.ptr);
+        } else |_| {}
 
         const address = try std.Io.net.UnixAddress.init(self.socket_path);
         var server = try address.listen(self.daemon.config.io, .{

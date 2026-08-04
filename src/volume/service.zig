@@ -43,7 +43,7 @@ pub const VolumeService = struct {
         const volumes_dir = try std.fmt.bufPrint(&path_buf, "{s}/volumes", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.config.io, volumes_dir, .{ .iterate = true }) catch |err| {
-            if (err == error.FileNotFound) return;
+            if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
         defer dir.close(self.config.io);

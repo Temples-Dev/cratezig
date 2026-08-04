@@ -78,7 +78,7 @@ pub const Daemon = struct {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.config.data_root, suffix });
             std.Io.Dir.createDirAbsolute(self.config.io, path, .default_dir) catch |err| {
-                if (err != error.PathAlreadyExists) return err;
+                if (err != error.PathAlreadyExists and err != error.AccessDenied) return err;
             };
         }
     }

@@ -127,7 +127,7 @@ const overlay = @import("overlay.zig");
         const images_dir = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDirAbsolute(self.config.io, images_dir, .{ .iterate = true }) catch |err| {
-            if (err == error.FileNotFound) return;
+            if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
         defer dir.close(self.config.io);
