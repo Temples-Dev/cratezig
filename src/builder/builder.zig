@@ -35,6 +35,8 @@ pub const BuildMetrics = struct {
     cache_resolve_ns: u64,
     filesystem_scan_ns: u64,
     layer_creation_ns: u64,
+    snapshot_creation_ns: u64 = 0,
+    oci_export_ns: u64 = 0,
     peak_rss_mb: f64,
     total_frontend_ns: u64,
     image: *Image,
@@ -46,6 +48,8 @@ pub const BuildMetrics = struct {
         const cache_ms = @as(f64, @floatFromInt(self.cache_resolve_ns)) / 1000000.0;
         const scan_ms = @as(f64, @floatFromInt(self.filesystem_scan_ns)) / 1000000.0;
         const layer_ms = @as(f64, @floatFromInt(self.layer_creation_ns)) / 1000000.0;
+        const snap_ms = @as(f64, @floatFromInt(self.snapshot_creation_ns)) / 1000000.0;
+        const oci_ms = @as(f64, @floatFromInt(self.oci_export_ns)) / 1000000.0;
         const total_ms = @as(f64, @floatFromInt(self.total_frontend_ns)) / 1000000.0;
 
         std.debug.print(
@@ -62,6 +66,8 @@ pub const BuildMetrics = struct {
             \\Cache resolve:     {d:.3} ms
             \\Filesystem scan:   {d:.3} ms
             \\Layer creation:    {d:.3} ms
+            \\Snapshot creation: {d:.3} ms
+            \\OCI Lazy export:   {d:.3} ms
             \\
             \\Peak RSS:          {d:.1} MB
             \\
@@ -78,6 +84,8 @@ pub const BuildMetrics = struct {
             cache_ms,
             scan_ms,
             layer_ms,
+            snap_ms,
+            oci_ms,
             self.peak_rss_mb,
             total_ms,
         });

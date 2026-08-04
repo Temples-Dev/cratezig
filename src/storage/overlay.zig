@@ -29,6 +29,29 @@ pub const OverlayDriver = struct {
             paths.workdir,
         });
     }
+
+    /// Fast kernel-level file copy using Linux copy_file_range.
+    pub fn copyFileRange(src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t, count: usize) !usize {
+        const ret = std.os.linux.copy_file_range(src_fd, null, dst_fd, null, count, 0);
+        return switch (std.posix.errno(ret)) {
+            .SUCCESS => ret,
+            .BADF => error.BadFileDescriptor,
+            .INVAL => error.InvalidArgument,
+            .NOSPC => error.NoSpaceLeft,
+            else => error.Unexpected,
+        };
+    }
+
+    /// Fast zero-copy filesystem reflink (CoW clone via FICLONE ioctl).
+    pub fn reflinkFile(src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t) !void {
+        const FICLONE: u32 = 0x40049409;
+        const ret = std.os.linux.ioctl(dst_fd, FICLONE, @intFromPtr(&src_fd));
+        return switch (std.posix.errno(ret)) {
+            .SUCCESS => {},
+            .OPNOTSUPP, .NOTTY, .INVAL => error.OperationNotSupported,
+            else => error.Unexpected,
+        };
+    }
 };
 
 test "overlay driver options" {
