@@ -370,7 +370,6 @@ pub fn handleLogs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Resp
     return Response{
         .status = .ok,
         .content_type = "application/vnd.docker.raw-stream",
-        .body = alloc.dupe(u8, out_buf.items) catch "",
+        .body = try out_buf.toOwnedSlice(alloc),
     };
 }
-

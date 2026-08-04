@@ -31,4 +31,5 @@ test "compilation check" {
     _ = @import("vpm/policy.zig");
     _ = @import("vpm/seccomp.zig");
     _ = @import("vpm/manager.zig");
+    _ = @import("server/handlers/system.zig");
 }

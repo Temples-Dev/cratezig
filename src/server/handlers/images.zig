@@ -35,6 +35,30 @@ pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
     return Response.ok(json);
 }
 
+pub fn handlePruneImages(req: Request, alloc: std.mem.Allocator) !Response {
+    _ = req;
+    var out_buf = std.ArrayList(u8).empty;
+    errdefer out_buf.deinit(alloc);
+
+    var jws = std.json.writeStream(out_buf.writer(alloc), .{});
+    defer jws.deinit();
+
+    try jws.beginObject();
+    try jws.objectField("ImagesDeleted");
+    try jws.beginArray();
+    try jws.endArray();
+
+    try jws.objectField("SpaceReclaimed");
+    try jws.write(@as(u64, 0));
+    try jws.endObject();
+
+    return Response{
+        .status = .ok,
+        .content_type = "application/json",
+        .body = try out_buf.toOwnedSlice(alloc),
+    };
+}
+
 pub fn remove(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const name = req.params.get("name") orelse return Response.badRequest("missing name");
     const force = if (req.query.get("force")) |f| std.mem.eql(u8, f, "true") else false;
