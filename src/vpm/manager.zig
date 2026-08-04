@@ -26,15 +26,14 @@ pub const VPMManager = struct {
         self: *VPMManager,
         level: PrivilegeLevel,
         exec_path: ?[]const u8,
-    ) !privilege.CapabilitySet {
-        var base_set = try privilege.CapabilitySet.initDefault(self.allocator, level);
-        errdefer base_set.deinit(self.allocator);
+    ) privilege.CapabilitySet {
+        var base_set = privilege.CapabilitySet.initDefault(level);
 
         inline for (std.meta.fields(privilege.Capability)) |field| {
             const cap: privilege.Capability = @enumFromInt(field.value);
             const decision = self.engine.evaluate(level, cap, exec_path);
             if (decision.action == .allow) {
-                try base_set.add(self.allocator, cap);
+                base_set.add(cap);
             } else if (decision.action == .deny) {
                 base_set.remove(cap);
             }
@@ -60,8 +59,8 @@ test "VPMManager dynamic capability resolution and seccomp generation" {
         .allowed_executable = "/bin/nginx",
     });
 
-    var cap_set = try manager.resolveEffectiveCapabilities(.restricted, "/bin/nginx");
-    defer cap_set.deinit(alloc);
+    var cap_set = manager.resolveEffectiveCapabilities(.restricted, "/bin/nginx");
+    defer cap_set.deinit();
 
     try std.testing.expect(cap_set.has(.cap_sys_admin));
 

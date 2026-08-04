@@ -71,14 +71,62 @@ const ROUTES = [_]Route{
     .{ .method = "DELETE", .pattern = "/volumes/{name}", .handler = vh.remove },
 };
 
+const RouteId = enum(u8) {
+    ping,
+    version,
+    info,
+    events,
+    disk_usage,
+    build,
+    container_list,
+    container_create,
+    container_prune,
+    image_list,
+    image_create,
+    network_list,
+    network_create,
+    volume_list,
+    volume_create,
+};
+
+const STATIC_ROUTES = std.StaticStringMap(RouteId).initComptime(.{
+    .{ "/_ping", .ping },
+    .{ "/version", .version },
+    .{ "/info", .info },
+    .{ "/events", .events },
+    .{ "/df", .disk_usage },
+    .{ "/build", .build },
+    .{ "/containers/json", .container_list },
+    .{ "/containers/create", .container_create },
+    .{ "/containers/prune", .container_prune },
+    .{ "/images/json", .image_list },
+    .{ "/images/create", .image_create },
+    .{ "/networks", .network_list },
+    .{ "/networks/create", .network_create },
+    .{ "/volumes", .volume_list },
+    .{ "/volumes/create", .volume_create },
+});
+
 pub fn dispatch(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const path = stripVersion(req.path);
 
-    inline for (ROUTES) |route| {
-        if (comptime std.mem.indexOfScalar(u8, route.pattern, '{') == null) {
-            if (std.mem.eql(u8, route.method, req.method) and std.mem.eql(u8, route.pattern, path)) {
-                return route.handler(daemon, req, alloc);
-            }
+    if (STATIC_ROUTES.get(path)) |route_id| {
+        switch (route_id) {
+            .ping => return sh.ping(daemon, req, alloc),
+            .version => return sh.version(daemon, req, alloc),
+            .info => return sh.info(daemon, req, alloc),
+            .events => return sh.events(daemon, req, alloc),
+            .disk_usage => return sh.diskUsage(daemon, req, alloc),
+            .build => return bh.build(daemon, req, alloc),
+            .container_list => return ch.list(daemon, req, alloc),
+            .container_create => return ch.create(daemon, req, alloc),
+            .container_prune => return ch.prune(daemon, req, alloc),
+            .image_list => return ih.list(daemon, req, alloc),
+            .image_create => return ih.pull(daemon, req, alloc),
+            .network_list => return nh.list(daemon, req, alloc),
+            .network_create => return nh.create(daemon, req, alloc),
+            .volume_list => return vh.list(daemon, req, alloc),
+            .volume_create => return vh.create(daemon, req, alloc),
         }
     }
 

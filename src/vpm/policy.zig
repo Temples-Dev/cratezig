@@ -78,8 +78,8 @@ pub const PolicyEngine = struct {
             }
         }
 
-        var cap_set = privilege.CapabilitySet.initDefault(self.allocator, level) catch return .{ .action = .deny, .reason = "failed to initialize baseline capabilities" };
-        defer cap_set.deinit(self.allocator);
+        var cap_set = privilege.CapabilitySet.initDefault(level);
+        defer cap_set.deinit();
 
         if (cap_set.has(requested_cap)) {
             return .{ .action = .allow, .reason = "capability present in profile baseline" };

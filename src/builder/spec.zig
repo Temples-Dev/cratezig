@@ -36,13 +36,20 @@ pub const Instruction = struct {
 
 pub const Dockerfile = struct {
     instructions: []Instruction,
+    stage_index_map: std.StringHashMap(u16),
     allocator: std.mem.Allocator,
 
     pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Dockerfile {
         var list = std.ArrayList(Instruction).empty;
+        var stage_map = std.StringHashMap(u16).init(allocator);
+        var stage_counter: u16 = 0;
+
         errdefer {
             for (list.items) |*inst| inst.deinit(allocator);
             list.deinit(allocator);
+            var it = stage_map.keyIterator();
+            while (it.next()) |k| allocator.free(k.*);
+            stage_map.deinit();
         }
 
         var multiline_buf = std.ArrayList(u8).empty;
@@ -101,9 +108,11 @@ pub const Dockerfile = struct {
                 for (args, 0..) |arg, i| {
                     if (std.ascii.eqlIgnoreCase(arg, "AS") and i + 1 < args.len) {
                         stage_name = try allocator.dupe(u8, args[i + 1]);
+                        try stage_map.put(try allocator.dupe(u8, stage_name.?), stage_counter);
                         break;
                     }
                 }
+                stage_counter += 1;
             } else if (kind == .copy) {
                 for (args) |arg| {
                     if (std.mem.startsWith(u8, arg, "--from=")) {
@@ -124,6 +133,7 @@ pub const Dockerfile = struct {
 
         return .{
             .instructions = try list.toOwnedSlice(allocator),
+            .stage_index_map = stage_map,
             .allocator = allocator,
         };
     }
@@ -131,6 +141,15 @@ pub const Dockerfile = struct {
     pub fn deinit(self: *Dockerfile) void {
         for (self.instructions) |*inst| inst.deinit(self.allocator);
         self.allocator.free(self.instructions);
+        var it = self.stage_index_map.keyIterator();
+        while (it.next()) |k| {
+            self.allocator.free(k.*);
+        }
+        self.stage_index_map.deinit();
+    }
+
+    pub fn getStageIndex(self: Dockerfile, name: []const u8) ?u16 {
+        return self.stage_index_map.get(name);
     }
 };
 
@@ -211,4 +230,21 @@ test "parse multi-stage dockerfile with AS and COPY --from" {
     try std.testing.expect(df.instructions.len == 5);
     try std.testing.expectEqualStrings("builder", df.instructions[0].stage_name.?);
     try std.testing.expectEqualStrings("builder", df.instructions[4].from_stage.?);
+}
+
+test "stage index map resolution" {
+    const alloc = std.testing.allocator;
+    const df_content =
+        \\FROM golang:1.21 AS builder
+        \\RUN echo build
+        \\FROM alpine:latest AS final
+        \\COPY --from=builder /app /app
+    ;
+
+    var df = try Dockerfile.parse(alloc, df_content);
+    defer df.deinit();
+
+    try std.testing.expectEqual(@as(?u16, 0), df.getStageIndex("builder"));
+    try std.testing.expectEqual(@as(?u16, 1), df.getStageIndex("final"));
+    try std.testing.expectEqual(@as(?u16, null), df.getStageIndex("missing"));
 }

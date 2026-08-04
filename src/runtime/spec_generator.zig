@@ -76,14 +76,17 @@ pub const SpecGenerator = struct {
         env: []const []const u8,
         level: PrivilegeLevel,
     ) !OciSpec {
-        var cap_set = try CapabilitySet.initDefault(self.allocator, level);
-        defer cap_set.deinit(self.allocator);
+        var cap_set = CapabilitySet.initDefault(level);
+        defer cap_set.deinit();
 
         var caps_list = std.ArrayList([]const u8).empty;
         defer caps_list.deinit(self.allocator);
 
-        for (cap_set.capabilities.items) |cap| {
-            try caps_list.append(self.allocator, cap.toString());
+        inline for (std.meta.fields(privilege.Capability)) |field| {
+            const cap: privilege.Capability = @enumFromInt(field.value);
+            if (cap_set.has(cap)) {
+                try caps_list.append(self.allocator, cap.toString());
+            }
         }
 
         const bounding = try self.allocator.dupe([]const u8, caps_list.items);

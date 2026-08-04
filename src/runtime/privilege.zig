@@ -60,49 +60,38 @@ pub const IdMap = struct {
 };
 
 pub const CapabilitySet = struct {
-    capabilities: std.ArrayList(Capability),
+    mask: u64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) CapabilitySet {
-        _ = allocator;
-        return .{
-            .capabilities = std.ArrayList(Capability).empty,
-        };
+    pub fn init() CapabilitySet {
+        return .{ .mask = 0 };
     }
 
-    pub fn deinit(self: *CapabilitySet, allocator: std.mem.Allocator) void {
-        self.capabilities.deinit(allocator);
+    pub fn deinit(self: *CapabilitySet) void {
+        self.mask = 0;
     }
 
     pub fn has(self: CapabilitySet, cap: Capability) bool {
-        for (self.capabilities.items) |c| {
-            if (c == cap) return true;
-        }
-        return false;
+        const shift: u6 = @intCast(@intFromEnum(cap));
+        return (self.mask & (@as(u64, 1) << shift)) != 0;
     }
 
-    pub fn add(self: *CapabilitySet, allocator: std.mem.Allocator, cap: Capability) !void {
-        if (!self.has(cap)) {
-            try self.capabilities.append(allocator, cap);
-        }
+    pub fn add(self: *CapabilitySet, cap: Capability) void {
+        const shift: u6 = @intCast(@intFromEnum(cap));
+        self.mask |= (@as(u64, 1) << shift);
     }
 
     pub fn remove(self: *CapabilitySet, cap: Capability) void {
-        for (self.capabilities.items, 0..) |c, i| {
-            if (c == cap) {
-                _ = self.capabilities.swapRemove(i);
-                break;
-            }
-        }
+        const shift: u6 = @intCast(@intFromEnum(cap));
+        self.mask &= ~(@as(u64, 1) << shift);
     }
 
-    pub fn initDefault(allocator: std.mem.Allocator, level: PrivilegeLevel) !CapabilitySet {
-        var set = CapabilitySet.init(allocator);
-        errdefer set.deinit(allocator);
+    pub fn initDefault(level: PrivilegeLevel) CapabilitySet {
+        var set = CapabilitySet.init();
 
         switch (level) {
             .restricted => {
-                try set.capabilities.append(allocator, .cap_chown);
-                try set.capabilities.append(allocator, .cap_net_bind_service);
+                set.add(.cap_chown);
+                set.add(.cap_net_bind_service);
             },
             .rootless, .standard => {
                 const std_caps = [_]Capability{
@@ -122,12 +111,12 @@ pub const CapabilitySet = struct {
                     .cap_setfcap,
                 };
                 for (std_caps) |cap| {
-                    try set.capabilities.append(allocator, cap);
+                    set.add(cap);
                 }
             },
             .privileged => {
                 inline for (@typeInfo(Capability).@"enum".fields) |field| {
-                    try set.capabilities.append(allocator, @enumFromInt(field.value));
+                    set.add(@enumFromInt(field.value));
                 }
             },
         }
@@ -136,13 +125,13 @@ pub const CapabilitySet = struct {
 };
 
 test "privilege capabilities setup" {
-    const alloc = std.testing.allocator;
+    var set_std = CapabilitySet.initDefault(.standard);
+    defer set_std.deinit();
+    try std.testing.expect(set_std.has(.cap_chown));
+    try std.testing.expect(set_std.has(.cap_net_bind_service));
+    try std.testing.expect(!set_std.has(.cap_sys_admin));
 
-    var set_std = try CapabilitySet.initDefault(alloc, .standard);
-    defer set_std.deinit(alloc);
-    try std.testing.expect(set_std.capabilities.items.len == 14);
-
-    var set_priv = try CapabilitySet.initDefault(alloc, .privileged);
-    defer set_priv.deinit(alloc);
-    try std.testing.expect(set_priv.capabilities.items.len == 19);
+    var set_priv = CapabilitySet.initDefault(.privileged);
+    defer set_priv.deinit();
+    try std.testing.expect(set_priv.has(.cap_sys_admin));
 }
