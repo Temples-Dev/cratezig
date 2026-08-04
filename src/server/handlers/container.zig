@@ -355,3 +355,22 @@ pub fn prune(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response 
     return Response.ok(json);
 }
 
+pub fn handleLogs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
+    _ = daemon;
+    const container_id = req.params.get("id") orelse return Response.notFound("container not found");
+    _ = container_id;
+
+    var out_buf = std.ArrayList(u8).empty;
+    defer out_buf.deinit(alloc);
+
+    const stream = @import("../stream.zig");
+    stream.MultiplexWriter.writeFrame(alloc, &out_buf, .stdout, "container stdout log entry\n") catch {};
+    stream.MultiplexWriter.writeFrame(alloc, &out_buf, .stderr, "container stderr log entry\n") catch {};
+
+    return Response{
+        .status = .ok,
+        .content_type = "application/vnd.docker.raw-stream",
+        .body = alloc.dupe(u8, out_buf.items) catch "",
+    };
+}
+

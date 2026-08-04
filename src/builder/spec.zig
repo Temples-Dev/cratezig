@@ -22,8 +22,12 @@ pub const Instruction = struct {
     kind: InstructionKind,
     raw: []const u8,
     args: [][]const u8,
+    stage_name: ?[]const u8 = null,
+    from_stage: ?[]const u8 = null,
 
     pub fn deinit(self: *Instruction, allocator: std.mem.Allocator) void {
+        if (self.stage_name) |sn| allocator.free(sn);
+        if (self.from_stage) |fs| allocator.free(fs);
         for (self.args) |a| allocator.free(a);
         allocator.free(self.args);
         allocator.free(self.raw);
@@ -44,10 +48,28 @@ pub const Dockerfile = struct {
         var multiline_buf = std.ArrayList(u8).empty;
         defer multiline_buf.deinit(allocator);
 
+        var heredoc_delimiter: ?[]const u8 = null;
+
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |raw_line| {
             const trimmed = std.mem.trim(u8, raw_line, " \r\t");
             if (trimmed.len == 0 or (multiline_buf.items.len == 0 and trimmed[0] == '#')) continue;
+
+            if (heredoc_delimiter) |delim| {
+                if (std.mem.eql(u8, trimmed, delim)) {
+                    heredoc_delimiter = null;
+                } else {
+                    if (multiline_buf.items.len > 0) try multiline_buf.append(allocator, '\n');
+                    try multiline_buf.appendSlice(allocator, raw_line);
+                    continue;
+                }
+            } else if (std.mem.indexOf(u8, trimmed, "<<") != null) {
+                if (std.mem.indexOf(u8, trimmed, "<<EOF")) |_| {
+                    heredoc_delimiter = "EOF";
+                    try multiline_buf.appendSlice(allocator, trimmed);
+                    continue;
+                }
+            }
 
             if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\\') {
                 const part = std.mem.trim(u8, trimmed[0 .. trimmed.len - 1], " \t");
@@ -72,10 +94,31 @@ pub const Dockerfile = struct {
             const kind = parseKind(verb) orelse continue;
             const args = try parseArgs(allocator, rest);
 
+            var stage_name: ?[]const u8 = null;
+            var from_stage: ?[]const u8 = null;
+
+            if (kind == .from) {
+                for (args, 0..) |arg, i| {
+                    if (std.ascii.eqlIgnoreCase(arg, "AS") and i + 1 < args.len) {
+                        stage_name = try allocator.dupe(u8, args[i + 1]);
+                        break;
+                    }
+                }
+            } else if (kind == .copy) {
+                for (args) |arg| {
+                    if (std.mem.startsWith(u8, arg, "--from=")) {
+                        from_stage = try allocator.dupe(u8, arg["--from=".len..]);
+                        break;
+                    }
+                }
+            }
+
             try list.append(allocator, .{
                 .kind = kind,
                 .raw = try allocator.dupe(u8, line_to_parse),
                 .args = args,
+                .stage_name = stage_name,
+                .from_stage = from_stage,
             });
         }
 
@@ -148,4 +191,24 @@ test "parse simple Dockerfile" {
     try std.testing.expectEqual(InstructionKind.copy, df.instructions[3].kind);
     try std.testing.expectEqual(InstructionKind.run, df.instructions[4].kind);
     try std.testing.expectEqual(InstructionKind.cmd, df.instructions[5].kind);
+}
+
+test "parse multi-stage dockerfile with AS and COPY --from" {
+    const alloc = std.testing.allocator;
+    const df_content =
+        \\FROM golang:1.21 AS builder
+        \\WORKDIR /app
+        \\RUN <<EOF
+        \\echo building app
+        \\EOF
+        \\FROM alpine:latest
+        \\COPY --from=builder /app/bin /bin/app
+    ;
+
+    var df = try Dockerfile.parse(alloc, df_content);
+    defer df.deinit();
+
+    try std.testing.expect(df.instructions.len == 5);
+    try std.testing.expectEqualStrings("builder", df.instructions[0].stage_name.?);
+    try std.testing.expectEqualStrings("builder", df.instructions[4].from_stage.?);
 }

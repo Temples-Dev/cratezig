@@ -22,4 +22,7 @@ test "compilation check" {
     _ = @import("runtime/privilege.zig");
     _ = @import("runtime/spec_generator.zig");
     _ = @import("storage/overlay.zig");
+    _ = @import("server/stream.zig");
+    _ = @import("network/veth.zig");
+    _ = @import("network/port_mapper.zig");
 }

@@ -152,6 +152,16 @@ pub const Builder = struct {
             env_map.deinit();
         }
 
+        var stage_artifacts = std.StringHashMap([]const u8).init(self.allocator);
+        defer {
+            var it = stage_artifacts.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            stage_artifacts.deinit();
+        }
+
         var work_dir = try self.allocator.dupe(u8, "/");
         defer self.allocator.free(work_dir);
 
@@ -184,6 +194,13 @@ pub const Builder = struct {
                         current_parent = img.id;
                     }
                 },
+                .copy => {
+                    if (inst.from_stage) |fs| {
+                        if (stage_artifacts.get(fs)) |layer_id| {
+                            current_parent = layer_id;
+                        }
+                    }
+                },
                 .env => {
                     if (inst.args.len >= 2) {
                         const k = try self.allocator.dupe(u8, inst.args[0]);
@@ -206,7 +223,7 @@ pub const Builder = struct {
                         final_cmd = try self.allocator.dupe(u8, inst.args[0]);
                     }
                 },
-                .run, .copy, .add, .expose, .entrypoint, .arg, .label, .user, .healthcheck, .volume, .shell => {},
+                .run, .add, .expose, .entrypoint, .arg, .label, .user, .healthcheck, .volume, .shell => {},
             }
 
             var layer_bytes: [32]u8 = undefined;
@@ -218,6 +235,15 @@ pub const Builder = struct {
             defer self.allocator.free(step_layer);
             try self.cache.put(self.config.io, cache_key, step_layer);
             current_parent = step_layer;
+
+            if (inst.stage_name) |sn| {
+                const k_dup = try self.allocator.dupe(u8, sn);
+                const v_dup = try self.allocator.dupe(u8, current_parent);
+                if (try stage_artifacts.fetchPut(k_dup, v_dup)) |old| {
+                    self.allocator.free(old.key);
+                    self.allocator.free(old.value);
+                }
+            }
 
             layer_ns += @intCast(std.Io.Clock.now(.awake, self.config.io).toNanoseconds() - layer_start);
         }
