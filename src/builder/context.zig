@@ -5,14 +5,17 @@ pub const BuildContext = struct {
     io: std.Io,
     context_dir: []const u8,
     checksum: []const u8,
+    total_bytes: u64,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, context_dir: []const u8) !BuildContext {
-        const hash = try computeDirectoryChecksum(allocator, io, context_dir);
+        var total_bytes: u64 = 0;
+        const hash = try computeDirectoryChecksum(allocator, io, context_dir, &total_bytes);
         return .{
             .allocator = allocator,
             .io = io,
             .context_dir = try allocator.dupe(u8, context_dir),
             .checksum = hash,
+            .total_bytes = total_bytes,
         };
     }
 
@@ -42,7 +45,7 @@ pub const BuildContext = struct {
         }
     }
 
-    fn computeDirectoryChecksum(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) ![]const u8 {
+    fn computeDirectoryChecksum(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8, total_bytes: *u64) ![]const u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(dir_path);
 
@@ -58,6 +61,11 @@ pub const BuildContext = struct {
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
             hasher.update(entry.name);
+            if (entry.kind == .file) {
+                if (dir.statFile(io, entry.name, .{})) |st| {
+                    total_bytes.* += st.size;
+                } else |_| {}
+            }
         }
 
         var digest: [32]u8 = undefined;

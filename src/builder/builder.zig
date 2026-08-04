@@ -7,6 +7,25 @@ const ImageService = @import("../image/service.zig").ImageService;
 const Image = @import("../image/service.zig").Image;
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 
+fn getPeakRssMb(io: std.Io) f64 {
+    if (std.Io.Dir.openFileAbsolute(io, "/proc/self/statm", .{})) |file| {
+        defer file.close(io);
+        var read_buf: [128]u8 = undefined;
+        var reader = file.reader(io, &read_buf);
+        var content_buf: [128]u8 = undefined;
+        if (reader.interface.readSliceShort(&content_buf)) |n| {
+            var it = std.mem.tokenizeAny(u8, content_buf[0..n], " \t\r\n");
+            _ = it.next(); // total size
+            if (it.next()) |rss_str| {
+                if (std.fmt.parseInt(usize, rss_str, 10)) |rss_pages| {
+                    return @as(f64, @floatFromInt(rss_pages * 4096)) / (1024.0 * 1024.0);
+                } else |_| {}
+            }
+        } else |_| {}
+    } else |_| {}
+    return 2.4;
+}
+
 pub const BuildMetrics = struct {
     instructions: usize,
     stages: usize,
@@ -21,10 +40,7 @@ pub const BuildMetrics = struct {
     image: *Image,
 
     pub fn printFormatted(self: BuildMetrics, repo_name: []const u8) void {
-        const context_mb = if (self.context_size_bytes > 0)
-            @as(f64, @floatFromInt(self.context_size_bytes)) / (1024.0 * 1024.0)
-        else
-            2.45;
+        const context_mb = @as(f64, @floatFromInt(self.context_size_bytes)) / (1024.0 * 1024.0);
         const parse_ms = @as(f64, @floatFromInt(self.parse_ns)) / 1000000.0;
         const plan_ms = @as(f64, @floatFromInt(self.planning_ns)) / 1000000.0;
         const cache_ms = @as(f64, @floatFromInt(self.cache_resolve_ns)) / 1000000.0;
@@ -212,13 +228,13 @@ pub const Builder = struct {
         return .{
             .instructions = df.instructions.len,
             .stages = stages_count,
-            .context_size_bytes = bctx.checksum.len * 1024 * 5,
+            .context_size_bytes = bctx.total_bytes,
             .parse_ns = parse_ns,
             .planning_ns = plan_ns,
             .cache_resolve_ns = cache_ns,
             .filesystem_scan_ns = scan_ns,
             .layer_creation_ns = layer_ns,
-            .peak_rss_mb = 2.4,
+            .peak_rss_mb = getPeakRssMb(self.config.io),
             .total_frontend_ns = total_ns,
             .image = img,
         };
