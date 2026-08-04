@@ -25,4 +25,7 @@ test "compilation check" {
     _ = @import("server/stream.zig");
     _ = @import("network/veth.zig");
     _ = @import("network/port_mapper.zig");
+    _ = @import("container/health.zig");
+    _ = @import("storage/volume.zig");
+    _ = @import("container/exec.zig");
 }
