@@ -73,6 +73,28 @@ pub const CapabilitySet = struct {
         self.capabilities.deinit(allocator);
     }
 
+    pub fn has(self: CapabilitySet, cap: Capability) bool {
+        for (self.capabilities.items) |c| {
+            if (c == cap) return true;
+        }
+        return false;
+    }
+
+    pub fn add(self: *CapabilitySet, allocator: std.mem.Allocator, cap: Capability) !void {
+        if (!self.has(cap)) {
+            try self.capabilities.append(allocator, cap);
+        }
+    }
+
+    pub fn remove(self: *CapabilitySet, cap: Capability) void {
+        for (self.capabilities.items, 0..) |c, i| {
+            if (c == cap) {
+                _ = self.capabilities.swapRemove(i);
+                break;
+            }
+        }
+    }
+
     pub fn initDefault(allocator: std.mem.Allocator, level: PrivilegeLevel) !CapabilitySet {
         var set = CapabilitySet.init(allocator);
         errdefer set.deinit(allocator);

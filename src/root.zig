@@ -28,4 +28,7 @@ test "compilation check" {
     _ = @import("container/health.zig");
     _ = @import("storage/volume.zig");
     _ = @import("container/exec.zig");
+    _ = @import("vpm/policy.zig");
+    _ = @import("vpm/seccomp.zig");
+    _ = @import("vpm/manager.zig");
 }
