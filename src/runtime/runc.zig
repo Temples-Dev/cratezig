@@ -1,4 +1,6 @@
 const std = @import("std");
+const spec_gen = @import("spec_generator.zig");
+const privilege = @import("privilege.zig");
 
 pub const RuncState = struct {
     id: []const u8,
@@ -33,7 +35,7 @@ fn runCmd(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) !R
         .stdout = .pipe,
         .stderr = .pipe,
     });
-    
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout_reader = proc.stdout.?.reader(io, &stdout_buf);
     const stdout = try stdout_reader.interface.allocRemaining(allocator, .unlimited);
@@ -50,6 +52,35 @@ fn runCmd(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) !R
         .stderr = stderr,
         .term = term,
     };
+}
+
+pub fn prepareBundle(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    bundle_dir: []const u8,
+    args: []const []const u8,
+    env: []const []const u8,
+    level: privilege.PrivilegeLevel,
+) !void {
+    const generator = spec_gen.SpecGenerator.init(allocator);
+    var spec = try generator.generate(args, env, level);
+    defer {
+        allocator.free(spec.linux.maskedPaths);
+        allocator.free(spec.linux.readonlyPaths);
+        spec.deinit(allocator);
+    }
+
+    var config_path_buf: [512]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/config.json", .{bundle_dir});
+
+    var file = try std.Io.Dir.createFileAbsolute(io, config_path, .{});
+    defer file.close(io);
+
+    var json_buf = std.ArrayList(u8).empty;
+    defer json_buf.deinit(allocator);
+
+    try std.json.stringify(spec, .{}, json_buf.writer(allocator));
+    _ = try file.writer(io).write(json_buf.items);
 }
 
 pub fn create(io: std.Io, container_id: []const u8, bundle_dir: []const u8, allocator: std.mem.Allocator) !void {
@@ -73,6 +104,31 @@ pub fn start(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator)
     const state = try getState(io, container_id, allocator);
     defer state.deinit(allocator);
     return state.parsed.value.pid;
+}
+
+test "runc prepare bundle with privilege spec" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const tmp_dir = "/tmp/cratezig-bundle-test";
+    var dir = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch return;
+    dir.makeDir(io, "cratezig-bundle-test") catch {};
+
+    const args = [_][]const u8{"/bin/echo", "hello"};
+    const env = [_][]const u8{"ENV=test"};
+
+    try prepareBundle(io, alloc, tmp_dir, &args, &env, .standard);
+
+    var config_file = try std.Io.Dir.openFileAbsolute(io, "/tmp/cratezig-bundle-test/config.json", .{});
+    defer config_file.close(io);
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = config_file.reader(io, &read_buf);
+    const content = try reader.interface.readAlloc(alloc, 4096);
+    defer alloc.free(content);
+
+    try std.testing.expect(content.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, content, "CAP_CHOWN") != null);
 }
 
 pub fn getState(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !ParsedState {

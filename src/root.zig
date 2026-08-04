@@ -19,4 +19,7 @@ test "compilation check" {
     _ = @import("builder/cache.zig");
     _ = @import("builder/context.zig");
     _ = @import("builder/builder.zig");
+    _ = @import("runtime/privilege.zig");
+    _ = @import("runtime/spec_generator.zig");
+    _ = @import("storage/overlay.zig");
 }
