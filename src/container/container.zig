@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
-const privilege = @import("../runtime/privilege.zig");
+const PrivilegeLevel = @import("../runtime/privilege.zig").PrivilegeLevel;
 
 pub const ContainerConfig = struct {
     image: []const u8,
@@ -28,7 +28,7 @@ pub const ContainerConfig = struct {
 
     stop_timeout: u32 = 10,
 
-    privilege_level: privilege.PrivilegeLevel = .standard,
+    privilege_level: PrivilegeLevel = .standard,
 
     labels: std.StringHashMap([]const u8),
 
