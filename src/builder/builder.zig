@@ -244,3 +244,63 @@ test "experiment on Moby Dockerfile.simple and full Dockerfile" {
         std.debug.print("===================================================\n", .{});
     } else |_| {}
 }
+
+test "experiment on Kubernetes and TensorFlow Dockerfiles" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var cfg = DaemonConfig.init(io);
+    cfg.data_root = "/tmp/cratezig-k8s-tf-test";
+
+    var image_service = try ImageService.init(alloc, cfg);
+    defer image_service.deinit();
+
+    var builder = Builder.init(alloc, cfg, &image_service);
+    defer builder.deinit();
+
+    // 1. Kubernetes agnhost Dockerfile
+    if (std.Io.Dir.openFileAbsolute(io, "/home/life-mac-africa/Work/kubernetes/test/images/agnhost/Dockerfile", .{})) |file_k8s| {
+        defer file_k8s.close(io);
+
+        var read_buf: [2048]u8 = undefined;
+        var reader = file_k8s.reader(io, &read_buf);
+        var content_buf: [8192]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&content_buf);
+        const k8s_content = content_buf[0..n];
+
+        var df_k8s = try Dockerfile.parse(alloc, k8s_content);
+        defer df_k8s.deinit();
+
+        const start_k8s = std.Io.Clock.now(.awake, io).toNanoseconds();
+        const img_k8s = try builder.build(k8s_content, "/home/life-mac-africa/Work/kubernetes/test/images/agnhost", "k8s-agnhost:latest");
+        const dur_k8s_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_k8s, 1000000);
+
+        std.debug.print("\n=== Kubernetes agnhost Benchmark ===\n", .{});
+        std.debug.print("Parsed instructions: {d}\n", .{df_k8s.instructions.len});
+        std.debug.print("Build duration: {d} ms (Image ID: {s})\n", .{ dur_k8s_ms, img_k8s.id });
+        std.debug.print("=====================================\n", .{});
+    } else |_| {}
+
+    // 2. TensorFlow build Dockerfile
+    if (std.Io.Dir.openFileAbsolute(io, "/home/life-mac-africa/Work/tensorflow/tensorflow/tools/tf_sig_build_dockerfiles/Dockerfile", .{})) |file_tf| {
+        defer file_tf.close(io);
+
+        var read_buf: [2048]u8 = undefined;
+        var reader = file_tf.reader(io, &read_buf);
+        var content_buf: [8192]u8 = undefined;
+        const n = try reader.interface.readSliceShort(&content_buf);
+        const tf_content = content_buf[0..n];
+
+        var df_tf = try Dockerfile.parse(alloc, tf_content);
+        defer df_tf.deinit();
+
+        const start_tf = std.Io.Clock.now(.awake, io).toNanoseconds();
+        const img_tf = try builder.build(tf_content, "/home/life-mac-africa/Work/tensorflow/tensorflow/tools/tf_sig_build_dockerfiles", "tensorflow-builder:latest");
+        const dur_tf_ms = @divTrunc(std.Io.Clock.now(.awake, io).toNanoseconds() - start_tf, 1000000);
+
+        std.debug.print("\n=== TensorFlow Build Dockerfile Benchmark ===\n", .{});
+        std.debug.print("Parsed instructions: {d}\n", .{df_tf.instructions.len});
+        std.debug.print("Build duration: {d} ms (Image ID: {s})\n", .{ dur_tf_ms, img_tf.id });
+        std.debug.print("==============================================\n", .{});
+    } else |_| {}
+}
