@@ -70,16 +70,16 @@ pub const Daemon = struct {
 
     fn setupDirectories(io: std.Io, data_root: []const u8) !void {
         const dirs = [_][]const u8{
-            "",                                 "/containers",
+            "",                                       "/containers",
             "/image/overlay2/imagedb/content/sha256", "/image/overlay2/layerdb/sha256",
-            "/overlay2/l",                      "/volumes",
+            "/overlay2/l",                            "/volumes",
             "/network/files",
         };
         for (dirs) |suffix| {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ data_root, suffix });
-            std.Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err| {
-                if (err != error.PathAlreadyExists and err != error.AccessDenied) return err;
+            std.Io.Dir.createDirPath(.cwd(), io, path) catch |err| {
+                if (err != error.AccessDenied) return err;
             };
         }
     }
