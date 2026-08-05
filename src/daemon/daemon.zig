@@ -32,6 +32,9 @@ pub const Daemon = struct {
     builder: Builder,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !Daemon {
+        // Step 1: Ensure all data directories exist first
+        try setupDirectories(config.io, config.data_root);
+
         var images_svc = try ImageService.init(allocator, config);
         errdefer images_svc.deinit();
 
@@ -46,9 +49,6 @@ pub const Daemon = struct {
             .builder = undefined,
         };
         d.builder = Builder.init(allocator, config, &d.images);
-
-        // Step 1: Create data directories
-        try d.setupDataDirectories();
 
         // Step 2: Load existing containers from disk
         try d.containers.loadFromDisk(config.data_root, allocator);
@@ -68,16 +68,17 @@ pub const Daemon = struct {
         self.volumes.deinit();
     }
 
-    fn setupDataDirectories(self: *Daemon) !void {
+    fn setupDirectories(io: std.Io, data_root: []const u8) !void {
         const dirs = [_][]const u8{
-            "/containers",                    "/image/overlay2/imagedb/content/sha256",
-            "/image/overlay2/layerdb/sha256", "/overlay2/l",
-            "/volumes",                       "/network/files",
+            "",                                 "/containers",
+            "/image/overlay2/imagedb/content/sha256", "/image/overlay2/layerdb/sha256",
+            "/overlay2/l",                      "/volumes",
+            "/network/files",
         };
         for (dirs) |suffix| {
             var buf: [512]u8 = undefined;
-            const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.config.data_root, suffix });
-            std.Io.Dir.createDirAbsolute(self.config.io, path, .default_dir) catch |err| {
+            const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ data_root, suffix });
+            std.Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err| {
                 if (err != error.PathAlreadyExists and err != error.AccessDenied) return err;
             };
         }
