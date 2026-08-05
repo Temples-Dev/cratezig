@@ -4,6 +4,8 @@ pub const Image = @import("types.zig").Image;
 const ImageConfig = @import("types.zig").ImageConfig;
 const RootFS = @import("types.zig").RootFS;
 const CrateError = @import("../errdefs/errors.zig").Error;
+pub const MetadataCache = @import("metadata_cache.zig").MetadataCache;
+pub const hashTag = @import("metadata_cache.zig").hashTag;
 
 pub const LoadError = error{
     InvalidJson,
@@ -15,6 +17,9 @@ pub const ImageService = struct {
     config: DaemonConfig,
     by_id: std.StringHashMap(*Image),
     by_tag: std.StringHashMap(*Image),
+    by_prefix: std.AutoHashMap(u64, *Image),
+    by_tag_hash: std.AutoHashMap(u64, *Image),
+    metadata_cache: MetadataCache,
     lock: std.Io.RwLock = .init,
 
     pub fn init(allocator: std.mem.Allocator, config: DaemonConfig) !ImageService {
@@ -23,6 +28,9 @@ pub const ImageService = struct {
             .config = config,
             .by_id = std.StringHashMap(*Image).init(allocator),
             .by_tag = std.StringHashMap(*Image).init(allocator),
+            .by_prefix = std.AutoHashMap(u64, *Image).init(allocator),
+            .by_tag_hash = std.AutoHashMap(u64, *Image).init(allocator),
+            .metadata_cache = MetadataCache.init(),
         };
         try svc.loadFromDisk();
         return svc;
@@ -42,6 +50,8 @@ pub const ImageService = struct {
         }
         self.by_id.deinit();
         self.by_tag.deinit();
+        self.by_prefix.deinit();
+        self.by_tag_hash.deinit();
     }
 
     pub fn get(self: *ImageService, id: []const u8) ?*Image {
@@ -62,7 +72,15 @@ pub const ImageService = struct {
         else
             std.fmt.bufPrint(&tag_buf, "{s}:latest", .{id_or_tag}) catch id_or_tag;
 
+        const th = hashTag(tag);
+        if (self.by_tag_hash.get(th)) |img| return img;
         if (self.by_tag.get(tag)) |img| return img;
+
+        if (id_or_tag.len >= 8) {
+            if (std.fmt.parseInt(u64, id_or_tag[0..8], 16)) |prefix_h| {
+                if (self.by_prefix.get(prefix_h)) |img| return img;
+            } else |_| {}
+        }
 
         var prefix_match: ?*Image = null;
         var it = self.by_id.iterator();
@@ -147,6 +165,15 @@ const overlay = @import("overlay.zig");
             try self.by_id.put(img.id, img);
             for (img.repo_tags) |t| {
                 try self.by_tag.put(t, img);
+                try self.by_tag_hash.put(hashTag(t), img);
+            }
+
+            var clean_id = img.id;
+            if (std.mem.startsWith(u8, clean_id, "sha256:")) clean_id = clean_id[7..];
+            if (clean_id.len >= 8) {
+                if (std.fmt.parseInt(u64, clean_id[0..8], 16)) |prefix_h| {
+                    try self.by_prefix.put(prefix_h, img);
+                } else |_| {}
             }
         }
     }
@@ -265,6 +292,7 @@ const overlay = @import("overlay.zig");
         if (old_tags.len > 0) self.allocator.free(old_tags);
 
         try self.by_tag.put(new_tag, img);
+        try self.by_tag_hash.put(hashTag(new_tag), img);
 
         try self.saveImageToDisk(img);
     }
