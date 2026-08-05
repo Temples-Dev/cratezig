@@ -37,10 +37,10 @@ pub fn main(init: std.process.Init) !void {
                 child_args[i] = a;
             }
 
-            const target_sock = if (std.Io.Dir.openFileAbsolute(io, "/var/run/cratezig.sock", .{}) catch null) |f| blk: {
-                f.close(io);
-                break :blk "unix:///var/run/cratezig.sock";
-            } else "unix:///tmp/cratezig.sock";
+            const target_sock = if (std.Io.Dir.accessAbsolute(io, "/var/run/cratezig.sock", .{})) |_|
+                "unix:///var/run/cratezig.sock"
+            else |_|
+                "unix:///tmp/cratezig.sock";
 
             try init.environ_map.put("DOCKER_HOST", target_sock);
 

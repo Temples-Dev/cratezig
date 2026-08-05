@@ -25,6 +25,8 @@ pub const Server = struct {
         });
         defer server.deinit(self.daemon.config.io);
 
+        _ = std.os.linux.chmod(&path_buf, 0o666);
+
         std.log.info("API listening on {s}", .{self.socket_path});
 
         while (true) {
