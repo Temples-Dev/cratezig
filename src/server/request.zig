@@ -97,3 +97,32 @@ pub fn parseRequest(raw: []const u8, allocator: std.mem.Allocator) !Request {
 
     return req;
 }
+
+pub fn decodeChunked(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var cursor: usize = 0;
+    while (cursor < raw.len) {
+        const line_end = std.mem.indexOfPos(u8, raw, cursor, "\r\n") orelse break;
+        const line = std.mem.trim(u8, raw[cursor..line_end], " ");
+        if (line.len == 0) {
+            cursor = line_end + 2;
+            continue;
+        }
+
+        const chunk_len = std.fmt.parseInt(usize, line, 16) catch break;
+        if (chunk_len == 0) break;
+
+        const data_start = line_end + 2;
+        if (data_start + chunk_len > raw.len) {
+            try out.appendSlice(allocator, raw[data_start..]);
+            break;
+        }
+
+        try out.appendSlice(allocator, raw[data_start .. data_start + chunk_len]);
+        cursor = data_start + chunk_len + 2;
+    }
+
+    return out.toOwnedSlice(allocator);
+}

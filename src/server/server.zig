@@ -2,6 +2,7 @@ const std = @import("std");
 const Daemon = @import("../daemon/daemon.zig").Daemon;
 const router = @import("router.zig");
 const parseRequest = @import("request.zig").parseRequest;
+const decodeChunked = @import("request.zig").decodeChunked;
 const Response = @import("response.zig").Response;
 
 pub const Server = struct {
@@ -46,6 +47,7 @@ const ConnContext = struct {
 };
 
 fn handleConnection(ctx: *ConnContext) void {
+    std.log.info("handleConnection: accepted connection", .{});
     defer ctx.allocator.destroy(ctx);
     defer ctx.conn.close(ctx.daemon.config.io);
 
@@ -56,14 +58,65 @@ fn handleConnection(ctx: *ConnContext) void {
     var buf: [8192]u8 = undefined;
     var read_buf: [1024]u8 = undefined;
     var reader = ctx.conn.reader(ctx.daemon.config.io, &read_buf);
-    const n = reader.interface.readSliceShort(&buf) catch return;
+    var slices = [_][]u8{&buf};
+    const n = reader.interface.readVec(&slices) catch return;
     if (n == 0) return;
     const raw = buf[0..n];
 
     var req = parseRequest(raw, alloc) catch return;
+
+    const te = req.headers.get("Transfer-Encoding") orelse req.headers.get("transfer-encoding");
+    const is_chunked = if (te) |val| std.mem.indexOfPos(u8, val, 0, "chunked") != null else false;
+    const is_build = std.mem.indexOf(u8, req.path, "/build") != null;
+    const cl = req.headers.get("Content-Length") orelse req.headers.get("content-length");
+    if (cl) |cl_str| {
+        if (std.fmt.parseInt(usize, cl_str, 10)) |content_len| {
+            if (req.body.len < content_len) {
+                const full_body = alloc.alloc(u8, content_len) catch return;
+                @memcpy(full_body[0..req.body.len], req.body);
+
+                var read_so_far = req.body.len;
+                while (read_so_far < content_len) {
+                    var chunk: [8192]u8 = undefined;
+                    var chunk_slices = [_][]u8{&chunk};
+                    const bytes_read = reader.interface.readVec(&chunk_slices) catch break;
+                    if (bytes_read == 0) break;
+                    const to_copy = @min(bytes_read, content_len - read_so_far);
+                    @memcpy(full_body[read_so_far .. read_so_far + to_copy], chunk[0..to_copy]);
+                    read_so_far += to_copy;
+                }
+                req.body = full_body[0..read_so_far];
+            }
+        } else |_| {}
+    } else if (is_chunked or is_build) {
+        var body_list = std.ArrayList(u8).empty;
+        defer body_list.deinit(alloc);
+        if (req.body.len > 0) {
+            body_list.appendSlice(alloc, req.body) catch return;
+        }
+
+        while (true) {
+            var read_chunk: [8192]u8 = undefined;
+            var chunk_slices = [_][]u8{&read_chunk};
+            const bytes_read = reader.interface.readVec(&chunk_slices) catch break;
+            if (bytes_read == 0) break;
+            body_list.appendSlice(alloc, read_chunk[0..bytes_read]) catch break;
+            if (std.mem.endsWith(u8, body_list.items, "0\r\n\r\n")) break;
+        }
+        const full_raw = body_list.toOwnedSlice(alloc) catch return;
+        if (is_chunked) {
+            req.body = decodeChunked(alloc, full_raw) catch full_raw;
+        } else {
+            req.body = full_raw;
+        }
+    }
+
     const res = router.dispatch(ctx.daemon, &req, alloc);
 
-    writeResponse(ctx.daemon.config.io, ctx.conn, res) catch {};
+    writeResponse(ctx.daemon.config.io, ctx.conn, res) catch |err| {
+        std.log.err("handleConnection: write error: {}", .{err});
+    };
+    std.log.info("handleConnection: done response", .{});
 }
 
 fn writeResponse(io: std.Io, stream: std.Io.net.Stream, res: Response) !void {
@@ -87,4 +140,5 @@ fn writeResponse(io: std.Io, stream: std.Io.net.Stream, res: Response) !void {
     if (res.body.len > 0) {
         try writer.interface.writeAll(res.body);
     }
+    try writer.interface.flush();
 }
