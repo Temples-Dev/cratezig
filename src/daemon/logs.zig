@@ -11,7 +11,7 @@ pub fn containerLogs(daemon: *Daemon, name: []const u8, allocator: std.mem.Alloc
         ctr.id[0..],
     });
 
-    const file = std.Io.Dir.openFileAbsolute(daemon.config.io, log_path, .{}) catch |err| {
+    const file = std.Io.Dir.openFile(.cwd(), daemon.config.io, log_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             return try allocator.dupe(u8, "");
         }

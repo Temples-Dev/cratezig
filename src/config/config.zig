@@ -80,7 +80,7 @@ pub const DaemonConfig = struct {
 
     /// Load config from JSON file. Returns defaults if file doesn't exist
     pub fn loadConfig(self: *const DaemonConfig, allocator: std.mem.Allocator, path: []const u8) !DaemonConfig {
-        const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch |err| {
+        const file = std.Io.Dir.openFile(.cwd(), self.io, path, .{}) catch |err| {
             if (err == openError.FileNotFound) return self.*;
             return err;
         };

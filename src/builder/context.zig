@@ -28,10 +28,10 @@ pub const BuildContext = struct {
         var src_buf: [512]u8 = undefined;
         const src_path = try std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ self.context_dir, src_rel });
 
-        var src_file = try std.Io.Dir.openFileAbsolute(self.io, src_path, .{});
+        var src_file = try std.Io.Dir.openFile(.cwd(), self.io, src_path, .{});
         defer src_file.close(self.io);
 
-        var dest_file = try std.Io.Dir.createFileAbsolute(self.io, dest_abs, .{});
+        var dest_file = try std.Io.Dir.createFile(.cwd(), self.io, dest_abs, .{});
         defer dest_file.close(self.io);
 
         var buf: [8192]u8 = undefined;
@@ -49,7 +49,7 @@ pub const BuildContext = struct {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(dir_path);
 
-        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch {
+        var dir = std.Io.Dir.openDir(.cwd(), io, dir_path, .{ .iterate = true }) catch {
             var digest: [32]u8 = undefined;
             hasher.final(&digest);
             var hex: [64]u8 = undefined;

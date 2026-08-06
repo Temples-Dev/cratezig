@@ -111,26 +111,28 @@ pub fn containerStats(daemon: *Daemon, name: []const u8, allocator: std.mem.Allo
 
 fn readCgroupFile(io: std.Io, path: []const u8) ?u64 {
     if (path.len == 0) return null;
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    const file = std.Io.Dir.openFile(.cwd(), io, path, .{}) catch return null;
     defer file.close(io);
 
     var read_buf: [64]u8 = undefined;
     var buf: [64]u8 = undefined;
     var reader = file.reader(io, &read_buf);
-    const n = reader.interface.readSliceShort(&buf) catch return null;
+    var slices = [_][]u8{&buf};
+    const n = reader.interface.readVec(&slices) catch return null;
     const trimmed = std.mem.trim(u8, buf[0..n], " \r\n");
     return std.fmt.parseInt(u64, trimmed, 10) catch null;
 }
 
 fn readCgroupCpu(io: std.Io, path: []const u8) ?u64 {
     if (path.len == 0) return null;
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    const file = std.Io.Dir.openFile(.cwd(), io, path, .{}) catch return null;
     defer file.close(io);
 
     var read_buf: [256]u8 = undefined;
     var buf: [512]u8 = undefined;
     var reader = file.reader(io, &read_buf);
-    const n = reader.interface.readSliceShort(&buf) catch return null;
+    var slices = [_][]u8{&buf};
+    const n = reader.interface.readVec(&slices) catch return null;
     var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
 
     while (lines.next()) |line| {

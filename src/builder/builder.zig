@@ -8,7 +8,7 @@ const Image = @import("../image/service.zig").Image;
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 
 fn getPeakRssMb(io: std.Io) f64 {
-    if (std.Io.Dir.openFileAbsolute(io, "/proc/self/statm", .{})) |file| {
+    if (std.Io.Dir.openFile(.cwd(), io, "/proc/self/statm", .{})) |file| {
         defer file.close(io);
         var read_buf: [128]u8 = undefined;
         var reader = file.reader(io, &read_buf);

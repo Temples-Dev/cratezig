@@ -144,7 +144,7 @@ const overlay = @import("overlay.zig");
         var path_buf: [512]u8 = undefined;
         const images_dir = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256", .{self.config.data_root});
 
-        var dir = std.Io.Dir.openDirAbsolute(self.config.io, images_dir, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.openDir(.cwd(), self.config.io, images_dir, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
@@ -179,7 +179,7 @@ const overlay = @import("overlay.zig");
     }
 
     fn loadImageFromFile(self: *ImageService, path: []const u8) !*Image {
-        const file = try std.Io.Dir.openFileAbsolute(self.config.io, path, .{});
+        const file = try std.Io.Dir.openFile(.cwd(), self.config.io, path, .{});
         defer file.close(self.config.io);
 
         var read_buf: [4096]u8 = undefined;

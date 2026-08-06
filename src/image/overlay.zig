@@ -43,7 +43,7 @@ pub fn createReadOnlyLayer(io: std.Io, data_root: []const u8, layer_id: []const 
     // If there's a parent, build the 'lower' chain
     if (parent_id) |pid| {
         const parent_link_path = try std.fmt.bufPrint(&buf, "{s}/overlay2/{s}/link", .{ data_root, pid });
-        var parent_link_file = try std.Io.Dir.openFileAbsolute(io, parent_link_path, .{ .mode = .read_only });
+        var parent_link_file = try std.Io.Dir.openFile(.cwd(), io, parent_link_path, .{ .mode = .read_only });
         var read_buf: [64]u8 = undefined;
         const parent_short = try parent_link_file.reader(io, &read_buf).interface.readAlloc(allocator, 64);
         defer allocator.free(parent_short);

@@ -142,7 +142,7 @@ pub const NetworkController = struct {
         var path_buf: [512]u8 = undefined;
         const net_dir = try std.fmt.bufPrint(&path_buf, "{s}/network/files", .{self.config.data_root});
 
-        var dir = std.Io.Dir.openDirAbsolute(self.config.io, net_dir, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.openDir(.cwd(), self.config.io, net_dir, .{ .iterate = true }) catch |err| {
             if (err == std.Io.Dir.OpenError.FileNotFound or err == std.Io.Dir.OpenError.AccessDenied) return;
             return err;
         };
@@ -166,7 +166,7 @@ pub const NetworkController = struct {
     }
 
     fn loadNetworkFromFile(self: *NetworkController, path: []const u8) !*Network {
-        const file = try std.Io.Dir.openFileAbsolute(self.config.io, path, .{});
+        const file = try std.Io.Dir.openFile(.cwd(), self.config.io, path, .{});
         defer file.close(self.config.io);
 
         var read_buf: [4096]u8 = undefined;

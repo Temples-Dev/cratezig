@@ -110,7 +110,7 @@ pub const ContainerStore = struct {
         var path_buf: [512]u8 = undefined;
         const containers_dir = try std.fmt.bufPrint(&path_buf, "{s}/containers", .{data_root});
 
-        var dir = std.Io.Dir.openDirAbsolute(self.io, containers_dir, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.openDir(.cwd(), self.io, containers_dir, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
@@ -141,7 +141,7 @@ pub const LoadError = error{
 };
 
 fn loadContainerFromFile(io: std.Io, path: []const u8, allocator: std.mem.Allocator) !*Container {
-    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
 
     var read_buf: [4096]u8 = undefined;

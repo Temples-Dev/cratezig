@@ -42,7 +42,7 @@ pub const VolumeService = struct {
         var path_buf: [512]u8 = undefined;
         const volumes_dir = try std.fmt.bufPrint(&path_buf, "{s}/volumes", .{self.config.data_root});
 
-        var dir = std.Io.Dir.openDirAbsolute(self.config.io, volumes_dir, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.openDir(.cwd(), self.config.io, volumes_dir, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound or err == error.AccessDenied) return;
             return err;
         };
@@ -80,7 +80,7 @@ pub const VolumeService = struct {
         vol.scope = "local";
 
         // opts.json is optional — absence is not a failure
-        const file = std.Io.Dir.openFileAbsolute(self.config.io, opts_path, .{}) catch return vol;
+        const file = std.Io.Dir.openFile(.cwd(), self.config.io, opts_path, .{}) catch return vol;
         defer file.close(self.config.io);
 
         var read_buf: [4096]u8 = undefined;

@@ -73,7 +73,7 @@ pub fn prepareBundle(
     var config_path_buf: [512]u8 = undefined;
     const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/config.json", .{bundle_dir});
 
-    var file = try std.Io.Dir.createFileAbsolute(io, config_path, .{});
+    var file = try std.Io.Dir.createFile(.cwd(), io, config_path, .{});
     defer file.close(io);
 
     var json_buf = std.ArrayList(u8).empty;
