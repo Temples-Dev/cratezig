@@ -43,6 +43,7 @@ pub fn main(init: std.process.Init) !void {
                 "unix:///tmp/cratezig.sock";
 
             try init.environ_map.put("DOCKER_HOST", target_sock);
+            try init.environ_map.put("DOCKER_BUILDKIT", "0");
 
             var child = try std.process.spawn(io, .{
                 .argv = child_args,
