@@ -56,6 +56,30 @@ Not verified: a real container run. That needs root plus image layers (Phase 2).
 notices a client disconnect at its next event. `logs -f` waits for the Phase 3 shim. `rm` of a
 never-started container logs a harmless umount error. `-it`/TTY stays off until attach lands.
 
+**Phase 2: done (core).**
+- `docker pull` works for real. References normalize the way Docker's do. Token auth works
+  (anonymous or `X-Registry-Auth`). OCI and Docker v2 manifests and indexes are supported, with
+  host-platform selection. Plain HTTP is used for localhost and `insecure-registries`.
+- Redirects are followed by hand so the registry token never reaches the blob CDN. Zig 0.16's
+  `privileged_headers` are never actually sent.
+- Every blob is sha256-verified in `content/` before an atomic rename. Each layer's
+  uncompressed stream is checked against its `diff_id` before it is committed.
+- Own tar reader keeping uid/gid, hardlinks, devices, PAX and xattrs. The unpacker walks
+  parents with O_NOFOLLOW and rejects `..`/symlink escapes. OCI whiteouts become overlay
+  whiteouts. gzip, zstd and plain layers are supported.
+- Layers are chain-ID overlay2 dirs with short `l/` links. Container `lower` chains come from
+  the image's layers.
+- Up to 3 layers download in parallel while extraction proceeds in order. `nginx:alpine`
+  went from 20s to about 13s. Compressed blobs are dropped once unpacked.
+- `rmi`: 409 while a container uses the image, `-f` untags, and unshared layers are collected.
+  Images are refcounted like containers.
+- The smoke suite (51 checks) covers pull, re-pull, errors, the rmi rules and layer GC against
+  Docker Hub.
+
+**Phase 2 gaps:** save/load, history, image prune, and resuming interrupted downloads.
+Whiteouts, device nodes and chown only take effect as root, so they are unverified here (no
+root on the dev box). Actually running a container from a pulled image still needs a root test.
+
 ## 1. Where it stood (original review)
 
 - About 7.8k LOC across 70 files. Every file is already under 500 lines. The largest are
