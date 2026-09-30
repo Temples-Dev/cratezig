@@ -5,12 +5,12 @@ const Events = @import("../events/events.zig").Events;
 const ImageService = @import("../image/service.zig").ImageService;
 const NetController = @import("../network/controller.zig").NetworkController;
 const VolumeService = @import("../volume/service.zig").VolumeService;
-const Builder = @import("../builder/builder.zig").Builder;
+const runc = @import("../runtime/runc.zig");
 
 pub const Daemon = struct {
     allocator: std.mem.Allocator,
 
-    /// Loaded from /etc/docker/daemon.json at startup (mostly immutable)
+    /// Loaded from /etc/cratezig/daemon.json at startup (mostly immutable)
     config: Config,
 
     /// All containers — the source of truth for what exists
@@ -28,47 +28,49 @@ pub const Daemon = struct {
     /// Volume operations (create/mount/unmount)
     volumes: VolumeService,
 
-    /// Image Builder service
-    builder: Builder,
+    /// "<exec_root>/runc", handed to the runc wrapper.
+    runc_root: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) !Daemon {
-        // Step 1: Ensure all data directories exist first
-        try setupDirectories(config.io, config.data_root);
+    /// Heap-allocates the daemon. Services keep pointers into it, so it
+    /// must never be copied or moved after this call.
+    pub fn create(allocator: std.mem.Allocator, config: Config) !*Daemon {
+        try setupDirectories(config.io, config.data_root, config.exec_root);
 
-        var images_svc = try ImageService.init(allocator, config);
-        errdefer images_svc.deinit();
+        const d = try allocator.create(Daemon);
+        errdefer allocator.destroy(d);
+        d.runc_root = try std.fmt.allocPrint(allocator, "{s}/runc", .{config.exec_root});
+        errdefer allocator.free(d.runc_root);
+        runc.configure(config.runc_path, d.runc_root);
 
-        var d = Daemon{
-            .allocator = allocator,
-            .config = config,
-            .containers = ContainerStore.init(allocator, config.io),
-            .events = Events.init(allocator, config.io),
-            .images = images_svc,
-            .network = try NetController.init(allocator, config),
-            .volumes = try VolumeService.init(allocator, config),
-            .builder = undefined,
-        };
-        d.builder = Builder.init(allocator, config, &d.images);
+        d.allocator = allocator;
+        d.config = config;
+        d.containers = ContainerStore.init(allocator, config.io);
+        errdefer d.containers.deinit();
+        d.events = Events.init(allocator, config.io);
+        errdefer d.events.deinit();
+        d.images = try ImageService.init(allocator, config);
+        errdefer d.images.deinit();
+        d.network = try NetController.init(allocator, config);
+        errdefer d.network.deinit();
+        d.volumes = try VolumeService.init(allocator, config);
+        errdefer d.volumes.deinit();
 
-        // Step 2: Load existing containers from disk
         try d.containers.loadFromDisk(config.data_root, allocator);
-
-        // Step 3: Initialize networking (creates docker0 bridge etc.)
         try d.network.setup();
-
         return d;
     }
 
-    pub fn deinit(self: *Daemon) void {
-        self.builder.deinit();
+    pub fn destroy(self: *Daemon) void {
         self.containers.deinit();
         self.events.deinit();
         self.images.deinit();
         self.network.deinit();
         self.volumes.deinit();
+        self.allocator.free(self.runc_root);
+        self.allocator.destroy(self);
     }
 
-    fn setupDirectories(io: std.Io, data_root: []const u8) !void {
+    fn setupDirectories(io: std.Io, data_root: []const u8, exec_root: []const u8) !void {
         const dirs = [_][]const u8{
             "",                                       "/containers",
             "/image/overlay2/imagedb/content/sha256", "/image/overlay2/layerdb/sha256",
@@ -78,9 +80,11 @@ pub const Daemon = struct {
         for (dirs) |suffix| {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}{s}", .{ data_root, suffix });
-            std.Io.Dir.createDirPath(.cwd(), io, path) catch |err| {
-                if (err != error.AccessDenied) return err;
-            };
+            try std.Io.Dir.createDirPath(.cwd(), io, path);
+        }
+        for ([_][]const u8{ "/runc", "/bundles" }) |suffix| {
+            var buf: [512]u8 = undefined;
+            try std.Io.Dir.createDirPath(.cwd(), io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ exec_root, suffix }));
         }
     }
 

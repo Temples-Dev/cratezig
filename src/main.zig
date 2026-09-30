@@ -2,6 +2,7 @@ const std = @import("std");
 const Config = @import("config/config.zig");
 const Daemon = @import("daemon/daemon.zig").Daemon;
 const Server = @import("server/server.zig").Server;
+const monitor = @import("daemon/monitor.zig");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -56,14 +57,22 @@ pub fn main(init: std.process.Init) !void {
 
     // Run Cratezig Daemon
     const default_cfg = Config.DaemonConfig.init(io);
-    const cfg = default_cfg.loadConfig(alloc, "/etc/cratezig/daemon.json") catch default_cfg;
+    var config_path: []const u8 = Config.default_config_path;
+    if (args.len > 3 and std.mem.eql(u8, args[2], "--config")) config_path = args[3];
+    const cfg = default_cfg.loadConfig(init.arena.allocator(), config_path) catch |err| {
+        std.log.err("failed to load {s}: {}", .{ config_path, err });
+        return err;
+    };
 
-    var daemon = try Daemon.init(alloc, cfg);
-    defer daemon.deinit();
+    monitor.becomeSubreaper();
+
+    const daemon = try Daemon.create(alloc, cfg);
+    defer daemon.destroy();
 
     var active_socket: []const u8 = "/var/run/cratezig.sock";
-    var server = Server.init(&daemon, active_socket, alloc);
+    var server = Server.init(daemon, active_socket, alloc);
 
+    std.log.info("Cratezig daemon starting (data-root: {s})", .{cfg.data_root});
     server.listen() catch |err| {
         if (err == error.AccessDenied or err == error.PermissionDenied or err == error.AddressInUse) {
             active_socket = "/tmp/cratezig.sock";
@@ -73,6 +82,4 @@ pub fn main(init: std.process.Init) !void {
             return err;
         }
     };
-
-    std.log.info("Cratezig daemon started (data-root: {s}, socket: {s})", .{ cfg.data_root, active_socket });
 }
