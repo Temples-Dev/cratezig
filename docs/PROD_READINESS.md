@@ -309,3 +309,21 @@ Recommendation: (b) first so compose `build:` works. (a) later if a native fast 
 | 6 API parity | CLI/compose output correctness | ongoing, ~1 week |
 | 7 Builder | `docker build`, compose `build:` | 1 week (delegate) / 4+ weeks (native) |
 | 8 Ops | installable, supportable | 1 week |
+
+## 7. Issue tracking
+
+Known bugs and gaps that can't be fixed immediately are tracked as GitHub issues, labelled by
+`area:*`, `severity:*` and `phase-*`. New reports use the forms in `.github/ISSUE_TEMPLATE/`:
+**Bug report** (summary, area, severity, repro, expected-vs-dockerd, actual, code location,
+commit, environment) or **Missing Docker feature**. Security problems go through
+`SECURITY.md`, not public issues.
+
+| Phase | Issues |
+|---|---|
+| 3 (shim, attach, logs, exec) | #1 attach, #2 TTY, #3 logs, #4 exec, #7 live-restore, #8 shutdown |
+| 4 (networking) | #5 bridge/NAT |
+| 5 (volumes) | #6 named volumes silently skipped |
+| 6 (API parity) | #11 events, #12 stats, #14 ignored HostConfig, #15 ports, #16 info/df, #22 save/load/push |
+| 7 (builder) | #21 build |
+| 8 (ops) | #17 socket fallback |
+| unscheduled | #9 idle timeout, #10 events disconnect, #13 restart retries, #18 root CI, #19 pull lock, #20 deep images, #23 resumable pulls |
