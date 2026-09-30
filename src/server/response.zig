@@ -1,9 +1,33 @@
 const std = @import("std");
 
+/// The raw connection, handed to streaming handlers after headers are sent.
+pub const Conn = struct {
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+};
+
+/// A response whose body is produced incrementally (logs -f, events, wait)
+/// or that takes over the connection (attach, exec). `ctx` must live in the
+/// request arena.
+pub const Stream = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, conn: Conn) anyerror!void,
+    /// Always called once the response is done, even if `run` never ran
+    /// (e.g. the client vanished before headers were written).
+    cleanup: ?*const fn (ctx: *anyopaque) void = null,
+    /// Switch protocols (101 UPGRADED) when the client asked for it.
+    hijack: bool = false,
+};
+
 pub const Response = struct {
     status: u16,
     body: []const u8,
     content_type: []const u8 = "application/json",
+    stream: ?Stream = null,
+
+    pub fn streaming(content_type: []const u8, s: Stream) Response {
+        return .{ .status = 200, .body = "", .content_type = content_type, .stream = s };
+    }
 
     pub fn ok(body: []const u8) Response {
         return .{ .status = 200, .body = body };

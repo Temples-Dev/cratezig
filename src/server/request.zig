@@ -20,6 +20,8 @@ pub const PathParams = struct {
 
 pub const Request = struct {
     method: []const u8,
+    /// "HTTP/1.1" or "HTTP/1.0".
+    version: []const u8 = "HTTP/1.1",
     path: []const u8,
     /// Percent-decoded query parameters.
     query: std.StringHashMap([]const u8),
@@ -55,6 +57,13 @@ pub const Request = struct {
         return false;
     }
 
+    /// HTTP/1.1 defaults to persistent connections; 1.0 must opt in.
+    pub fn keepAlive(self: *const Request) bool {
+        const conn = self.header("connection") orelse return std.mem.eql(u8, self.version, "HTTP/1.1");
+        if (std.ascii.eqlIgnoreCase(conn, "close")) return false;
+        return std.mem.eql(u8, self.version, "HTTP/1.1") or std.ascii.eqlIgnoreCase(conn, "keep-alive");
+    }
+
     pub fn header(self: *const Request, lower_name: []const u8) ?[]const u8 {
         return self.headers.get(lower_name);
     }
@@ -71,6 +80,7 @@ pub fn parseHead(head: []const u8, allocator: std.mem.Allocator) !Request {
     var parts = std.mem.splitScalar(u8, first_line, ' ');
     req.method = parts.next() orelse return error.InvalidRequest;
     const target = parts.next() orelse return error.InvalidRequest;
+    req.version = parts.next() orelse "HTTP/1.0";
     if (req.method.len == 0 or target.len == 0 or target[0] != '/') return error.InvalidRequest;
 
     if (std.mem.indexOfScalar(u8, target, '?')) |qm| {

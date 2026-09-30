@@ -3,6 +3,7 @@ const Daemon = @import("../daemon/daemon.zig").Daemon;
 const router = @import("router.zig");
 const request = @import("request.zig");
 const Response = @import("response.zig").Response;
+const Conn = @import("response.zig").Conn;
 
 pub const Server = struct {
     daemon: *Daemon,
@@ -59,6 +60,10 @@ const ConnContext = struct {
 const max_head_size = 64 * 1024;
 const max_body_size: usize = 32 * 1024 * 1024;
 
+/// Idle keep-alive connections are closed after this many requests to bound
+/// per-connection memory held by long-lived clients.
+const max_requests_per_conn = 1000;
+
 fn handleConnection(ctx: *ConnContext) void {
     const io = ctx.daemon.config.io;
     defer ctx.allocator.destroy(ctx);
@@ -66,37 +71,69 @@ fn handleConnection(ctx: *ConnContext) void {
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
 
     var read_buf: [max_head_size]u8 = undefined;
     var reader = ctx.conn.reader(io, &read_buf);
+    var write_buf: [4096]u8 = undefined;
+    var writer = ctx.conn.writer(io, &write_buf);
+    const conn: Conn = .{ .reader = &reader.interface, .writer = &writer.interface };
 
-    const res = handleRequest(ctx.daemon, &reader.interface, alloc) catch |err| switch (err) {
-        error.EndOfStream, error.ReadFailed => return,
-        error.StreamTooLong => Response.errBody(431, "request header too large"),
-        error.PayloadTooLarge => Response.errBody(413, "request body too large"),
-        error.OutOfMemory => Response.internalError("out of memory"),
-        else => Response.badRequest("malformed HTTP request"),
-    };
+    for (0..max_requests_per_conn) |_| {
+        _ = arena.reset(.retain_capacity);
+        const alloc = arena.allocator();
 
-    writeResponse(io, ctx.conn, alloc, res) catch |err| {
-        std.log.warn("write response failed: {}", .{err});
-    };
+        var meta: Meta = .{};
+        const res = handleRequest(ctx.daemon, conn.reader, alloc, &meta) catch |err| switch (err) {
+            error.EndOfStream, error.ReadFailed => return,
+            error.StreamTooLong => Response.errBody(431, "request header too large"),
+            error.PayloadTooLarge => Response.errBody(413, "request body too large"),
+            error.OutOfMemory => Response.internalError("out of memory"),
+            else => Response.badRequest("malformed HTTP request"),
+        };
+
+        if (res.stream) |stream| {
+            defer if (stream.cleanup) |c| c(stream.ctx);
+            writeStreamHead(conn.writer, res, stream.hijack and meta.upgrade) catch return;
+            stream.run(stream.ctx, conn) catch |err| switch (err) {
+                error.WriteFailed, error.ReadFailed, error.EndOfStream => {},
+                else => std.log.warn("stream ended: {}", .{err}),
+            };
+            conn.writer.flush() catch {};
+            return; // streamed bodies are close-delimited
+        }
+
+        writeResponse(conn.writer, alloc, res, meta) catch return;
+        if (!meta.keep_alive) return;
+    }
 }
 
-fn handleRequest(daemon: *Daemon, r: *std.Io.Reader, alloc: std.mem.Allocator) !Response {
+const Meta = struct {
+    keep_alive: bool = false,
+    upgrade: bool = false,
+    head: bool = false,
+};
+
+fn handleRequest(daemon: *Daemon, r: *std.Io.Reader, alloc: std.mem.Allocator, meta: *Meta) !Response {
     // Collect the head line by line; a line longer than the reader buffer
     // yields error.StreamTooLong (431).
     var head = std.ArrayList(u8).empty;
     while (true) {
         const line = try r.takeDelimiterInclusive('\n');
         if (head.items.len + line.len > max_head_size) return error.StreamTooLong;
-        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) {
+            if (head.items.len == 0) continue; // tolerate stray CRLF between requests
+            break;
+        }
         try head.appendSlice(alloc, line);
     }
 
     var req = try request.parseHead(head.items, alloc);
     req.body = try readBody(r, &req, alloc);
+    meta.* = .{
+        .keep_alive = req.keepAlive(),
+        .upgrade = req.header("upgrade") != null,
+        .head = std.mem.eql(u8, req.method, "HEAD"),
+    };
     return router.dispatch(daemon, &req, alloc);
 }
 
@@ -146,11 +183,7 @@ fn statusText(status: u16) []const u8 {
     };
 }
 
-fn writeResponse(io: std.Io, stream: std.Io.net.Stream, alloc: std.mem.Allocator, res: Response) !void {
-    var write_buf: [4096]u8 = undefined;
-    var writer = stream.writer(io, &write_buf);
-    const w = &writer.interface;
-
+fn writeResponse(w: *std.Io.Writer, alloc: std.mem.Allocator, res: Response, meta: Meta) !void {
     // Errors always use Docker's {"message": "..."} shape, properly escaped.
     const is_error = res.status >= 400;
     const body = if (is_error and !(res.body.len > 0 and res.body[0] == '{'))
@@ -158,15 +191,33 @@ fn writeResponse(io: std.Io, stream: std.Io.net.Stream, alloc: std.mem.Allocator
     else
         res.body;
     const content_type = if (is_error) "application/json" else res.content_type;
+    const has_body = res.status != 204 and res.status != 304;
 
     try w.print("HTTP/1.1 {d} {s}\r\n", .{ res.status, statusText(res.status) });
-    try w.writeAll("Api-Version: 1.43\r\nServer: cratezig\r\n");
-    if (res.status != 204 and res.status != 304) {
-        try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n", .{ content_type, body.len });
-    }
-    try w.writeAll("Connection: close\r\n\r\n");
-    if (res.status != 204 and res.status != 304) try w.writeAll(body);
+    try writeCommonHeaders(w);
+    if (has_body) try w.print("Content-Type: {s}\r\n", .{content_type});
+    try w.print("Content-Length: {d}\r\n", .{if (has_body) body.len else 0});
+    try w.writeAll(if (meta.keep_alive) "Connection: keep-alive\r\n\r\n" else "Connection: close\r\n\r\n");
+    if (has_body and !meta.head) try w.writeAll(body);
     try w.flush();
+}
+
+fn writeStreamHead(w: *std.Io.Writer, res: Response, upgrade: bool) !void {
+    if (upgrade) {
+        try w.writeAll("HTTP/1.1 101 UPGRADED\r\n");
+        try writeCommonHeaders(w);
+        try w.print("Content-Type: {s}\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", .{res.content_type});
+    } else {
+        try w.print("HTTP/1.1 {d} {s}\r\n", .{ res.status, statusText(res.status) });
+        try writeCommonHeaders(w);
+        try w.print("Content-Type: {s}\r\nConnection: close\r\n\r\n", .{res.content_type});
+    }
+    // Clients (e.g. `docker run` waiting on /wait) rely on seeing headers early.
+    try w.flush();
+}
+
+fn writeCommonHeaders(w: *std.Io.Writer) !void {
+    try w.writeAll("Api-Version: 1.43\r\nDocker-Experimental: false\r\nOstype: linux\r\nServer: cratezig\r\n");
 }
 
 test "chunked body decoding" {
