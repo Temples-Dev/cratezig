@@ -28,8 +28,11 @@ test {
     _ = @import("errdefs/errors.zig");
     _ = @import("events/events.zig");
     _ = @import("image/overlay.zig");
+    _ = @import("image/reference.zig");
+    _ = @import("image/tarx.zig");
     _ = @import("image/service.zig");
     _ = @import("image/types.zig");
+    _ = @import("image/unpack.zig");
     _ = @import("network/bridge.zig");
     _ = @import("network/controller.zig");
     _ = @import("network/ipam.zig");
