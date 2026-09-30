@@ -39,16 +39,17 @@ pub const ImageService = struct {
 
     pub fn deinit(self: *ImageService) void {
         var it = self.by_id.valueIterator();
-        while (it.next()) |img| img.*.destroy(self.allocator);
+        while (it.next()) |img| img.*.release();
         self.by_id.deinit();
         self.by_tag.deinit();
         self.content.deinit(self.allocator);
     }
 
+    /// Resolves `ref`. The result is retained; the caller must `release()` it.
     pub fn getImage(self: *ImageService, ref: []const u8) !*Image {
         self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
-        return self.getImageLocked(ref);
+        return (try self.getImageLocked(ref)).retain();
     }
 
     /// Resolves an id, `sha256:`-less id, unique id prefix, or `repo[:tag]`.
@@ -154,10 +155,16 @@ pub const ImageService = struct {
         self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
 
-        var result = try std.ArrayList(*Image).initCapacity(allocator, self.by_id.count());
+        const result = try allocator.alloc(*Image, self.by_id.count());
         var it = self.by_id.valueIterator();
-        while (it.next()) |img| result.appendAssumeCapacity(img.*);
-        return try result.toOwnedSlice(allocator);
+        var i: usize = 0;
+        while (it.next()) |img| : (i += 1) result[i] = img.*.retain();
+        return result;
+    }
+
+    pub fn releaseList(allocator: std.mem.Allocator, items: []*Image) void {
+        for (items) |img| img.release();
+        allocator.free(items);
     }
 
     fn imagePath(self: *ImageService, id: []const u8, buf: []u8) ![]u8 {
@@ -307,7 +314,7 @@ pub const ImageService = struct {
             std.Io.Dir.deleteFileAbsolute(self.config.io, blob) catch {};
         } else |_| {}
         _ = self.by_id.remove(img.id);
-        defer img.destroy(self.allocator);
+        defer img.release();
         self.collectLayers(img) catch |err| std.log.warn("layer GC failed: {}", .{err});
 
         return response.toOwnedSlice(allocator);
@@ -391,8 +398,11 @@ test "image metadata round-trips through disk" {
     var svc = try ImageService.init(gpa, cfg);
     defer svc.deinit();
     const img = try svc.getImage("app:1");
+    defer img.release();
     try std.testing.expectEqualStrings("a \"quoted\" arg", img.config.cmd[1]);
-    try std.testing.expect(try svc.getImage("abcdef") == img);
+    const same = try svc.getImage("abcdef");
+    defer same.release();
+    try std.testing.expect(same == img);
 
     try svc.tagImage("app:1", "app", "2");
     const removed = try svc.removeImage(gpa, "app:1", false, &.{});
@@ -400,6 +410,8 @@ test "image metadata round-trips through disk" {
         for (removed) |r| if (r.untagged) |u| gpa.free(u);
         gpa.free(removed);
     }
-    try std.testing.expect(try svc.getImage("app:2") == img);
+    const app2 = try svc.getImage("app:2");
+    defer app2.release();
+    try std.testing.expect(app2 == img);
     try std.testing.expectError(CrateError.ImageNotFound, svc.getImage("app:1"));
 }

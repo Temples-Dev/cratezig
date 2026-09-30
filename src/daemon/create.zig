@@ -21,6 +21,7 @@ pub const CreateResponse = struct {
 /// field is deep-copied into the container's own arena.
 pub fn containerCreate(daemon: *Daemon, params: CreateConfig) !CreateResponse {
     const image = try daemon.images.getImage(params.config.image);
+    defer image.release();
 
     if (params.config.cmd.len == 0 and image.config.cmd.len == 0 and
         params.config.entrypoint.len == 0 and image.config.entrypoint.len == 0)

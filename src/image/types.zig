@@ -3,6 +3,9 @@ const std = @import("std");
 pub const Image = struct {
     /// Owns every slice below; freed with the image.
     arena: std.heap.ArenaAllocator,
+    /// One reference belongs to the image service while registered; every
+    /// `getImage`/`list` result holds another.
+    refs: std.atomic.Value(u32) = .init(1),
 
     id: []const u8,
     repo_tags: []const []const u8 = &.{},
@@ -24,6 +27,16 @@ pub const Image = struct {
         return self.arena.allocator();
     }
 
+    pub fn retain(self: *Image) *Image {
+        _ = self.refs.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    pub fn release(self: *Image) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) self.destroy(self.arena.child_allocator);
+    }
+
+    /// Only for images never handed out; otherwise `release`.
     pub fn destroy(self: *Image, gpa: std.mem.Allocator) void {
         self.arena.deinit();
         gpa.destroy(self);

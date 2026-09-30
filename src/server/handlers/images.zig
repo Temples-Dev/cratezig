@@ -3,13 +3,14 @@ const Daemon = @import("../../daemon/daemon.zig").Daemon;
 const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
 const ContainerStore = @import("../../container/store.zig").ContainerStore;
+const ImageService = @import("../../image/service.zig").ImageService;
 
 pub fn list(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     _ = req;
     const images = daemon.images.list(alloc) catch |err| {
         return Response.fromError(err);
     };
-    defer alloc.free(images);
+    defer ImageService.releaseList(alloc, images);
 
     const json = std.json.Stringify.valueAlloc(alloc, images, .{}) catch "[]";
     return Response.ok(json);
@@ -21,6 +22,7 @@ pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
     const img = daemon.images.getImage(name) catch |err| {
         return Response.fromError(err);
     };
+    defer img.release();
 
     const json = std.json.Stringify.valueAlloc(alloc, img.*, .{}) catch "{}";
     return Response.ok(json);
