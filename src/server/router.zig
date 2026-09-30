@@ -11,6 +11,7 @@ const nh = @import("handlers/networks.zig");
 const vh = @import("handlers/volumes.zig");
 const sh = @import("handlers/system.zig");
 const bh = @import("handlers/builder_handler.zig");
+const eh = @import("handlers/events.zig");
 
 const Handler = *const fn (daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response;
 
@@ -26,8 +27,8 @@ const ROUTES = [_]Route{
     .{ .method = "GET", .pattern = "/_ping", .handler = sh.ping },
     .{ .method = "GET", .pattern = "/version", .handler = sh.version },
     .{ .method = "GET", .pattern = "/info", .handler = sh.info },
-    .{ .method = "GET", .pattern = "/events", .handler = sh.events },
-    .{ .method = "GET", .pattern = "/df", .handler = sh.diskUsage },
+    .{ .method = "GET", .pattern = "/events", .handler = eh.stream },
+    .{ .method = "GET", .pattern = "/system/df", .handler = sh.diskUsage },
     .{ .method = "POST", .pattern = "/build", .handler = bh.build },
 
     // ── Containers ───────────────────────────────────────────────────────────
@@ -72,87 +73,45 @@ const ROUTES = [_]Route{
     .{ .method = "DELETE", .pattern = "/volumes/{name}", .handler = vh.remove },
 };
 
-const RouteId = enum(u8) {
-    ping,
-    version,
-    info,
-    events,
-    disk_usage,
-    build,
-    container_list,
-    container_create,
-    container_prune,
-    image_list,
-    image_create,
-    network_list,
-    network_create,
-    volume_list,
-    volume_create,
-};
-
-const STATIC_ROUTES = std.StaticStringMap(RouteId).initComptime(.{
-    .{ "/_ping", .ping },
-    .{ "/version", .version },
-    .{ "/info", .info },
-    .{ "/events", .events },
-    .{ "/df", .disk_usage },
-    .{ "/build", .build },
-    .{ "/containers/json", .container_list },
-    .{ "/containers/create", .container_create },
-    .{ "/containers/prune", .container_prune },
-    .{ "/images/json", .image_list },
-    .{ "/images/create", .image_create },
-    .{ "/networks", .network_list },
-    .{ "/networks/create", .network_create },
-    .{ "/volumes", .volume_list },
-    .{ "/volumes/create", .volume_create },
-});
+pub const max_api_version: u32 = 43;
+pub const min_api_version: u32 = 24;
 
 pub fn dispatch(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    const path = stripVersion(req.path);
-
-    if (STATIC_ROUTES.get(path)) |route_id| {
-        switch (route_id) {
-            .ping => return sh.ping(daemon, req, alloc),
-            .version => return sh.version(daemon, req, alloc),
-            .info => return sh.info(daemon, req, alloc),
-            .events => return sh.events(daemon, req, alloc),
-            .disk_usage => return sh.diskUsage(daemon, req, alloc),
-            .build => return bh.build(daemon, req, alloc),
-            .container_list => return ch.list(daemon, req, alloc),
-            .container_create => return cc.create(daemon, req, alloc),
-            .container_prune => return ch.prune(daemon, req, alloc),
-            .image_list => return ih.list(daemon, req, alloc),
-            .image_create => return ih.pull(daemon, req, alloc),
-            .network_list => return nh.list(daemon, req, alloc),
-            .network_create => return nh.create(daemon, req, alloc),
-            .volume_list => return vh.list(daemon, req, alloc),
-            .volume_create => return vh.create(daemon, req, alloc),
-        }
+    const split = splitVersion(req.path) catch return Response.badRequest("malformed API version in path");
+    if (split.minor) |minor| {
+        if (minor > max_api_version) return Response.badRequest(std.fmt.allocPrint(alloc, "client version 1.{d} is too new. Maximum supported API version is 1.{d}", .{ minor, max_api_version }) catch "client version too new");
+        if (minor < min_api_version) return Response.badRequest(std.fmt.allocPrint(alloc, "client version 1.{d} is too old. Minimum supported API version is 1.{d}", .{ minor, min_api_version }) catch "client version too old");
     }
+    const path = split.path;
+    const method = if (std.mem.eql(u8, req.method, "HEAD")) "GET" else req.method;
 
-    for (ROUTES) |route| {
-        if (std.mem.indexOfScalar(u8, route.pattern, '{') != null) {
-            if (std.mem.eql(u8, route.method, req.method)) {
-                var tmp_params = PathParams{};
-                if (matchPattern(route.pattern, path, &tmp_params)) {
-                    req.params = tmp_params;
-                    return route.handler(daemon, req, alloc);
-                }
+    // Literal routes win over parameterised ones ("/containers/json" vs "/containers/{name}").
+    for ([_]bool{ false, true }) |want_params| {
+        for (ROUTES) |route| {
+            const has_params = std.mem.indexOfScalar(u8, route.pattern, '{') != null;
+            if (has_params != want_params or !std.mem.eql(u8, route.method, method)) continue;
+            var params = PathParams{};
+            if (matchPattern(route.pattern, path, &params)) {
+                req.params = params;
+                return route.handler(daemon, req, alloc);
             }
         }
     }
-
-    return Response.notFound("no route matched");
+    return Response.notFound("page not found");
 }
 
-fn stripVersion(path: []const u8) []const u8 {
-    if (path.len > 1 and path[1] == 'v') {
-        if (std.mem.indexOf(u8, path[1..], "/")) |pos| {
-            return path[1 + pos ..];
-        }
-    }
-    return path;
+const VersionSplit = struct { path: []const u8, minor: ?u32 };
+
+/// "/v1.43/containers/json" -> ("/containers/json", 43). Only "/v<digit>"
+/// counts as a version prefix; "/volumes" is a normal path.
+fn splitVersion(path: []const u8) !VersionSplit {
+    if (path.len < 3 or path[1] != 'v' or !std.ascii.isDigit(path[2])) return .{ .path = path, .minor = null };
+    const end = std.mem.indexOfScalarPos(u8, path, 1, '/') orelse path.len;
+    const ver = path[2..end];
+    const dot = std.mem.indexOfScalar(u8, ver, '.') orelse return error.BadVersion;
+    if (!std.mem.eql(u8, ver[0..dot], "1")) return error.BadVersion;
+    const minor = std.fmt.parseInt(u32, ver[dot + 1 ..], 10) catch return error.BadVersion;
+    return .{ .path = if (end == path.len) "/" else path[end..], .minor = minor };
 }
 
 fn matchPattern(pattern: []const u8, path: []const u8, params: *PathParams) bool {
@@ -165,10 +124,25 @@ fn matchPattern(pattern: []const u8, path: []const u8, params: *PathParams) bool
         if (p == null and s == null) return true;
         if (p == null or s == null) return false;
         if (p.?.len > 0 and p.?[0] == '{' and p.?[p.?.len - 1] == '}') {
-            const key = p.?[1 .. p.?.len - 1];
-            params.put(key, s.?) catch return false;
+            if (s.?.len == 0) return false;
+            params.put(p.?[1 .. p.?.len - 1], s.?) catch return false;
         } else {
             if (!std.mem.eql(u8, p.?, s.?)) return false;
         }
     }
+}
+
+test "splitVersion only strips real version prefixes" {
+    try std.testing.expectEqualStrings("/volumes/x", (try splitVersion("/volumes/x")).path);
+    const v = try splitVersion("/v1.43/volumes/x");
+    try std.testing.expectEqualStrings("/volumes/x", v.path);
+    try std.testing.expectEqual(@as(?u32, 43), v.minor);
+    try std.testing.expectError(error.BadVersion, splitVersion("/v2/x"));
+}
+
+test "literal routes beat parameterised ones and params are captured" {
+    var params = PathParams{};
+    try std.testing.expect(matchPattern("/containers/{name}/start", "/containers/web/start", &params));
+    try std.testing.expectEqualStrings("web", params.get("name").?);
+    try std.testing.expect(!matchPattern("/containers/{name}", "/containers/", &params));
 }
