@@ -108,6 +108,15 @@ check "volume create" "201" "$(code -X POST -H 'Content-Type: application/json' 
 check "volume inspect" "200" "$(code http://d/v1.43/volumes/v1)"
 check "volume rm" "204" "$(code -X DELETE http://d/v1.43/volumes/v1)"
 
+# --- docker inspect shape ---
+api -X POST -H 'Content-Type: application/json' -d '{"Image":"testimg","Entrypoint":["/bin/sh","-c"],"Cmd":["echo hi"]}' 'http://d/v1.43/containers/create?name=insp' >/dev/null
+INSP="$(api http://d/v1.43/containers/insp/json)"
+contains "inspect path" '"Path":"/bin/sh"' "$INSP"
+contains "inspect args" '"Args":["-c","echo hi"]' "$INSP"
+contains "inspect name" '"Name":"/insp"' "$INSP"
+contains "inspect zero time" '"StartedAt":"0001-01-01T00:00:00Z"' "$INSP"
+check "rm insp" "204" "$(code -X DELETE http://d/v1.43/containers/insp)"
+
 # --- persistence across restart ---
 check "net create" "201" "$(code -X POST -H 'Content-Type: application/json' -d '{"Name":"n1","IPAM":{"Config":[{"Subnet":"10.99.0.0/24"}]}}' http://d/v1.43/networks/create)"
 api -X POST -H 'Content-Type: application/json' -d '{"Image":"testimg","Env":["A=1"]}' 'http://d/v1.43/containers/create?name=keep' >/dev/null
@@ -123,6 +132,7 @@ if command -v docker >/dev/null 2>&1; then
     export DOCKER_HOST="unix://$SOCK"
     contains "docker version" "API version:      1.43" "$(docker version 2>&1)"
     contains "docker ps -a" "keep" "$(docker ps -a 2>&1)"
+    check "docker inspect" "/keep created" "$(docker inspect -f '{{.Name}} {{.State.Status}}' keep 2>&1)"
     contains "docker network ls" "n1" "$(docker network ls 2>&1)"
     contains "docker pull msg" "not supported" "$(docker pull alpine 2>&1)"
     check "docker rm" "keep" "$(docker rm keep 2>&1)"
