@@ -5,10 +5,14 @@ const request = @import("request.zig");
 const Response = @import("response.zig").Response;
 const Conn = @import("response.zig").Conn;
 
+/// Each connection gets a thread; beyond this, new clients get 503.
+const max_connections = 1024;
+
 pub const Server = struct {
     daemon: *Daemon,
     allocator: std.mem.Allocator,
     socket_path: []const u8,
+    active: std.atomic.Value(u32) = .init(0),
 
     pub fn init(daemon: *Daemon, socket_path: []const u8, allocator: std.mem.Allocator) Server {
         return .{ .daemon = daemon, .socket_path = socket_path, .allocator = allocator };
@@ -35,15 +39,22 @@ pub const Server = struct {
                 std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
                 continue;
             };
+            if (self.active.fetchAdd(1, .acq_rel) >= max_connections) {
+                _ = self.active.fetchSub(1, .acq_rel);
+                rejectBusy(io, conn);
+                continue;
+            }
             const ctx = self.allocator.create(ConnContext) catch {
+                _ = self.active.fetchSub(1, .acq_rel);
                 conn.close(io);
                 continue;
             };
-            ctx.* = .{ .daemon = self.daemon, .conn = conn, .allocator = self.allocator };
+            ctx.* = .{ .daemon = self.daemon, .conn = conn, .allocator = self.allocator, .active = &self.active };
             const thread = std.Thread.spawn(.{}, handleConnection, .{ctx}) catch |err| {
                 std.log.err("cannot spawn connection thread: {}", .{err});
                 conn.close(io);
                 self.allocator.destroy(ctx);
+                _ = self.active.fetchSub(1, .acq_rel);
                 continue;
             };
             thread.detach();
@@ -55,7 +66,17 @@ const ConnContext = struct {
     daemon: *Daemon,
     conn: std.Io.net.Stream,
     allocator: std.mem.Allocator,
+    active: *std.atomic.Value(u32),
 };
+
+fn rejectBusy(io: std.Io, conn: std.Io.net.Stream) void {
+    defer conn.close(io);
+    var buf: [256]u8 = undefined;
+    var w = conn.writer(io, &buf);
+    const body = "{\"message\":\"daemon busy: too many connections\"}";
+    w.interface.print("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
+    w.interface.flush() catch {};
+}
 
 const max_head_size = 64 * 1024;
 const max_body_size: usize = 32 * 1024 * 1024;
@@ -66,6 +87,8 @@ const max_requests_per_conn = 1000;
 
 fn handleConnection(ctx: *ConnContext) void {
     const io = ctx.daemon.config.io;
+    const active = ctx.active; // ctx is freed by the next defer
+    defer _ = active.fetchSub(1, .acq_rel);
     defer ctx.allocator.destroy(ctx);
     defer ctx.conn.close(io);
 
