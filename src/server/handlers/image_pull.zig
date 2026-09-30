@@ -86,8 +86,8 @@ fn parseAuth(alloc: std.mem.Allocator, header: ?[]const u8) ?registry.Credential
 }
 
 pub fn pull(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    const from = req.query.get("fromImage") orelse return Response.badRequest("missing fromImage");
     if (req.query.get("fromSrc") != null) return Response.notImplemented("docker import is not supported by cratezig yet");
+    const from = req.query.get("fromImage") orelse return Response.badRequest("missing fromImage");
     const tag = req.query.get("tag") orelse "";
     const joined = if (tag.len == 0)
         from

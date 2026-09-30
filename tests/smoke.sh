@@ -100,8 +100,9 @@ kill "$EVPID" 2>/dev/null
 contains "events stream" '"Action":"destroy"' "$(cat "$WORK/events.out")"
 
 # --- honest 501s ---
-check "pull 501" "501" "$(code -X POST 'http://d/v1.43/images/create?fromImage=alpine&tag=latest')"
 check "build 501" "501" "$(code -X POST http://d/v1.43/build)"
+check "import 501" "501" "$(code -X POST 'http://d/v1.43/images/create?fromSrc=-')"
+check "bad reference" "400" "$(code -X POST 'http://d/v1.43/images/create?fromImage=UPPER')"
 
 # --- volumes (regression: /volumes/{name} was mangled as a version prefix) ---
 check "volume create" "201" "$(code -X POST -H 'Content-Type: application/json' -d '{"Name":"v1"}' http://d/v1.43/volumes/create)"
@@ -134,8 +135,25 @@ if command -v docker >/dev/null 2>&1; then
     contains "docker ps -a" "keep" "$(docker ps -a 2>&1)"
     check "docker inspect" "/keep created" "$(docker inspect -f '{{.Name}} {{.State.Status}}' keep 2>&1)"
     contains "docker network ls" "n1" "$(docker network ls 2>&1)"
-    contains "docker pull msg" "not supported" "$(docker pull alpine 2>&1)"
+    contains "docker pull" "alpine:latest" "$(docker pull alpine 2>&1)"
     check "docker rm" "keep" "$(docker rm keep 2>&1)"
+fi
+
+# --- registry pulls (needs network; skip with CRATEZIG_SMOKE_OFFLINE=1) ---
+if [ "${CRATEZIG_SMOKE_OFFLINE:-0}" != 1 ]; then
+    LAYERS_BEFORE="$(find "$WORK/data/overlay2" -maxdepth 1 -mindepth 1 ! -name l | wc -l | tr -d ' ')"
+    PULL="$(api -X POST 'http://d/v1.43/images/create?fromImage=busybox&tag=latest')"
+    contains "pull busybox" "Downloaded newer image for busybox:latest" "$PULL"
+    contains "pull progress" '"status":"Pull complete"' "$PULL"
+    contains "pulled image listed" '"busybox:latest"' "$(api http://d/v1.43/images/json)"
+    contains "image config kept" '"Cmd":["sh"]' "$(api http://d/v1.43/images/busybox/json)"
+    contains "pull again" "Image is up to date for busybox:latest" "$(api -X POST 'http://d/v1.43/images/create?fromImage=busybox&tag=latest')"
+    contains "pull missing" "pull access denied" "$(api -X POST 'http://d/v1.43/images/create?fromImage=cratezig-does-not-exist-xyz&tag=nope')"
+    api -X POST -H 'Content-Type: application/json' -d '{"Image":"busybox"}' 'http://d/v1.43/containers/create?name=bb' >/dev/null
+    check "rmi in use" "409" "$(code -X DELETE http://d/v1.43/images/busybox)"
+    check "rm bb" "204" "$(code -X DELETE http://d/v1.43/containers/bb)"
+    check "rmi" "200" "$(code -X DELETE http://d/v1.43/images/busybox)"
+    check "layers collected" "$LAYERS_BEFORE" "$(find "$WORK/data/overlay2" -maxdepth 1 -mindepth 1 ! -name l | wc -l | tr -d ' ')"
 fi
 
 echo "smoke: $PASS passed, $FAIL failed"
