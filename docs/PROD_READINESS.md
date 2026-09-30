@@ -37,10 +37,24 @@ Verified against the stock Docker CLI 29.x: `version`, `ps -a`, `images`, `creat
 `network ls/create`, clean 501 on `pull`/`build`, and state intact across daemon restarts.
 Not verified: a real container run. That needs root plus image layers (Phase 2).
 
-**Known gaps carried into Phase 1:** removed containers are leaked on purpose until refcounted
-handles land. Handlers read container fields without the lock. `inspect` still uses the
-internal shape (`Created` in ns). `rm` of a never-started container logs a harmless umount
-error. `-it`/TTY is forced off until the console socket and attach work.
+**Phase 1: done** (branch `prod/phase1`).
+- Containers are refcounted. `get`/`list` return retained handles, background threads hold
+  their own reference, and `rm` frees memory once the last holder releases it.
+- HTTP: keep-alive, bodyless HEAD, streamed responses (close-delimited, headers flushed early),
+  a 101 hijack path for attach/exec, API version checks (1.24–1.43, 400 outside that range),
+  method-aware routing, and a cap of 1024 concurrent connections (503 beyond it).
+  Fixed a `/volumes/{name}` → `/{name}` path-mangling bug.
+- `wait` blocks on a condition variable and supports `not-running`, `next-exit` and `removed`,
+  which `docker run` needs. `/events` streams with `type`/`event`/`container` filters and
+  `since`/`until`.
+- `inspect` returns Docker's shape (`Path`/`Args`, RFC 3339 times, `/name`). Container JSON is
+  produced under the container lock.
+- `tests/smoke.sh`: 40 checks against the real binary, run as non-root with curl and the stock
+  docker CLI. It runs in CI.
+
+**Known gaps:** there is no idle timeout on keep-alive connections. An `/events` stream only
+notices a client disconnect at its next event. `logs -f` waits for the Phase 3 shim. `rm` of a
+never-started container logs a harmless umount error. `-it`/TTY stays off until attach lands.
 
 ## 1. Where it stood (original review)
 
