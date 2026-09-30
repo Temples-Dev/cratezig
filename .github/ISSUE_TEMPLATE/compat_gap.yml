@@ -1,0 +1,31 @@
+name: Missing Docker feature
+description: A Docker CLI / Engine API feature cratezig does not support yet.
+labels: ["compat"]
+body:
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature
+      description: Which command, flag, or API endpoint?
+      placeholder: docker logs -f / GET /containers/{id}/logs?follow=1
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behaviour
+      description: 501, a wrong result, or silently ignored?
+    validations:
+      required: true
+  - type: textarea
+    id: docker
+    attributes:
+      label: Docker behaviour
+      description: What dockerd returns, with a link to the Engine API docs if possible.
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Implementation notes
+      description: Where it belongs, and its phase in docs/PROD_READINESS.md.
