@@ -1,125 +1,79 @@
 const std = @import("std");
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 pub const Image = @import("types.zig").Image;
-const ImageConfig = @import("types.zig").ImageConfig;
-const RootFS = @import("types.zig").RootFS;
 const CrateError = @import("../errdefs/errors.zig").Error;
-pub const MetadataCache = @import("metadata_cache.zig").MetadataCache;
-pub const hashTag = @import("metadata_cache.zig").hashTag;
+const fsutil = @import("../util/fsutil.zig");
+const ju = @import("../util/jsonutil.zig");
+const overlay = @import("overlay.zig");
 
-pub const LoadError = error{
-    InvalidJson,
-    MissingId,
-};
+pub const LoadError = error{ InvalidJson, MissingId };
 
 pub const ImageService = struct {
     allocator: std.mem.Allocator,
     config: DaemonConfig,
+    /// Keyed by full id ("sha256:<hex>"). Owns the images.
     by_id: std.StringHashMap(*Image),
+    /// Keyed by "repo:tag"; keys are owned by the image's arena.
     by_tag: std.StringHashMap(*Image),
-    by_prefix: std.AutoHashMap(u64, *Image),
-    by_tag_hash: std.AutoHashMap(u64, *Image),
-    metadata_cache: MetadataCache,
     lock: std.Io.RwLock = .init,
 
     pub fn init(allocator: std.mem.Allocator, config: DaemonConfig) !ImageService {
         var svc = ImageService{
             .allocator = allocator,
             .config = config,
-            .by_id = std.StringHashMap(*Image).init(allocator),
-            .by_tag = std.StringHashMap(*Image).init(allocator),
-            .by_prefix = std.AutoHashMap(u64, *Image).init(allocator),
-            .by_tag_hash = std.AutoHashMap(u64, *Image).init(allocator),
-            .metadata_cache = MetadataCache.init(),
+            .by_id = .init(allocator),
+            .by_tag = .init(allocator),
         };
+        errdefer svc.deinit();
         try svc.loadFromDisk();
         return svc;
     }
 
     pub fn deinit(self: *ImageService) void {
-        var it = self.by_id.iterator();
-        while (it.next()) |entry| {
-            const img = entry.value_ptr.*;
-            self.allocator.free(img.id);
-            for (img.repo_tags) |t| self.allocator.free(t);
-            self.allocator.free(img.repo_tags);
-            self.allocator.free(img.architecture);
-            self.allocator.free(img.os);
-            img.config.exposesd_ports.deinit();
-            self.allocator.destroy(img);
-        }
+        var it = self.by_id.valueIterator();
+        while (it.next()) |img| img.*.destroy(self.allocator);
         self.by_id.deinit();
         self.by_tag.deinit();
-        self.by_prefix.deinit();
-        self.by_tag_hash.deinit();
     }
 
-    pub fn get(self: *ImageService, id: []const u8) ?*Image {
+    pub fn getImage(self: *ImageService, ref: []const u8) !*Image {
         self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
-        return self.by_id.get(id);
+        return self.getImageLocked(ref);
     }
 
-    pub fn getImage(self: *ImageService, id_or_tag: []const u8) !*Image {
-        self.lock.lockSharedUncancelable(self.config.io);
-        defer self.lock.unlockShared(self.config.io);
+    /// Resolves an id, `sha256:`-less id, unique id prefix, or `repo[:tag]`.
+    /// Caller holds `lock`.
+    fn getImageLocked(self: *ImageService, ref: []const u8) !*Image {
+        if (self.by_id.get(ref)) |img| return img;
 
-        if (self.by_id.get(id_or_tag)) |img| return img;
+        var tag_buf: [512]u8 = undefined;
+        if (self.by_tag.get(try withDefaultTag(ref, &tag_buf))) |img| return img;
 
-        var tag_buf: [256]u8 = undefined;
-        const tag = if (std.mem.indexOfScalar(u8, id_or_tag, ':') != null)
-            id_or_tag
-        else
-            std.fmt.bufPrint(&tag_buf, "{s}:latest", .{id_or_tag}) catch id_or_tag;
-
-        const th = hashTag(tag);
-        if (self.by_tag_hash.get(th)) |img| return img;
-        if (self.by_tag.get(tag)) |img| return img;
-
-        if (id_or_tag.len >= 8) {
-            if (std.fmt.parseInt(u64, id_or_tag[0..8], 16)) |prefix_h| {
-                if (self.by_prefix.get(prefix_h)) |img| return img;
-            } else |_| {}
-        }
-
-        var prefix_match: ?*Image = null;
+        const hex = if (std.mem.startsWith(u8, ref, "sha256:")) ref[7..] else ref;
+        if (hex.len == 0) return CrateError.ImageNotFound;
+        var match: ?*Image = null;
         var it = self.by_id.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.startsWith(u8, entry.key_ptr.*, id_or_tag)) {
-                if (prefix_match != null) return CrateError.ImageNotFound;
-                prefix_match = entry.value_ptr.*;
+        while (it.next()) |e| {
+            const id_hex = if (std.mem.startsWith(u8, e.key_ptr.*, "sha256:")) e.key_ptr.*[7..] else e.key_ptr.*;
+            if (std.mem.startsWith(u8, id_hex, hex)) {
+                if (match != null) return CrateError.ImageNotFound; // ambiguous
+                match = e.value_ptr.*;
             }
         }
-        if (prefix_match) |img| return img;
-
-        return CrateError.ImageNotFound;
+        return match orelse CrateError.ImageNotFound;
     }
 
-const overlay = @import("overlay.zig");
-
-    /// Creates an overlay2 writable layer for a container.
-    /// Produces: overlay2/{id}/{diff,work}/ and overlay2/{id}/lower.
+    /// Creates the overlay2 directories for a container's writable layer.
+    /// The `lower` chain is written by the layer store once real image
+    /// layers exist (Phase 2); `image_id` is unused until then.
     pub fn createWritableLayer(self: *ImageService, id: *const [64]u8, image_id: []const u8) !void {
-        var layer_buf: [512]u8 = undefined;
-        const layer_path = try std.fmt.bufPrint(&layer_buf, "{s}/overlay2/{s}", .{ self.config.data_root, id });
-
-        try std.Io.Dir.createDirAbsolute(self.config.io, layer_path, .default_dir);
-
-        var diff_buf: [530]u8 = undefined;
-        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&diff_buf, "{s}/diff", .{layer_path}), .default_dir);
-
-        var work_buf: [530]u8 = undefined;
-        try std.Io.Dir.createDirAbsolute(self.config.io, try std.fmt.bufPrint(&work_buf, "{s}/work", .{layer_path}), .default_dir);
-
-        var lower_path_buf: [530]u8 = undefined;
-        const lower_path = try std.fmt.bufPrint(&lower_path_buf, "{s}/lower", .{layer_path});
-
-        const lower_file = try std.Io.Dir.createFileAbsolute(self.config.io, lower_path, .{});
-        defer lower_file.close(self.config.io);
-
-        var write_buf: [128]u8 = undefined;
-        var lower_writer = lower_file.writer(self.config.io, &write_buf);
-        try lower_writer.interface.writeAll(image_id);
+        _ = image_id;
+        for ([_][]const u8{ "diff", "work", "merged" }) |sub| {
+            var buf: [512]u8 = undefined;
+            const path = try std.fmt.bufPrint(&buf, "{s}/overlay2/{s}/{s}", .{ self.config.data_root, id, sub });
+            try std.Io.Dir.createDirPath(.cwd(), self.config.io, path);
+        }
     }
 
     pub fn mountWritableLayer(self: *ImageService, id: []const u8) !void {
@@ -140,317 +94,176 @@ const overlay = @import("overlay.zig");
         return try result.toOwnedSlice(allocator);
     }
 
+    fn imagePath(self: *ImageService, id: []const u8, buf: []u8) ![]u8 {
+        const hex = if (std.mem.startsWith(u8, id, "sha256:")) id[7..] else id;
+        return std.fmt.bufPrint(buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, hex });
+    }
+
+    fn index(self: *ImageService, img: *Image) !void {
+        try self.by_id.put(img.id, img);
+        for (img.repo_tags) |t| try self.by_tag.put(t, img);
+    }
+
     fn loadFromDisk(self: *ImageService) !void {
         var path_buf: [512]u8 = undefined;
         const images_dir = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256", .{self.config.data_root});
 
         var dir = std.Io.Dir.openDir(.cwd(), self.config.io, images_dir, .{ .iterate = true }) catch |err| {
-            if (err == error.FileNotFound or err == error.AccessDenied) return;
+            if (err == error.FileNotFound) return;
             return err;
         };
         defer dir.close(self.config.io);
 
         var it = dir.iterate();
         while (try it.next(self.config.io)) |entry| {
-            if (entry.kind != .file) continue;
-
+            if (entry.kind != .file or std.mem.endsWith(u8, entry.name, ".tmp")) continue;
             var img_path_buf: [512]u8 = undefined;
-            const img_path = try std.fmt.bufPrint(&img_path_buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, entry.name });
+            const img_path = try std.fmt.bufPrint(&img_path_buf, "{s}/{s}", .{ images_dir, entry.name });
 
             const img = self.loadImageFromFile(img_path) catch |err| {
                 std.log.warn("failed to load image {s}: {}", .{ entry.name, err });
                 continue;
             };
-
-            try self.by_id.put(img.id, img);
-            for (img.repo_tags) |t| {
-                try self.by_tag.put(t, img);
-                try self.by_tag_hash.put(hashTag(t), img);
-            }
-
-            var clean_id = img.id;
-            if (std.mem.startsWith(u8, clean_id, "sha256:")) clean_id = clean_id[7..];
-            if (clean_id.len >= 8) {
-                if (std.fmt.parseInt(u64, clean_id[0..8], 16)) |prefix_h| {
-                    try self.by_prefix.put(prefix_h, img);
-                } else |_| {}
-            }
+            self.index(img) catch |err| {
+                img.destroy(self.allocator);
+                return err;
+            };
         }
     }
 
     fn loadImageFromFile(self: *ImageService, path: []const u8) !*Image {
-        const file = try std.Io.Dir.openFile(.cwd(), self.config.io, path, .{});
-        defer file.close(self.config.io);
-
-        var read_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(self.config.io, &read_buf);
-        const content = try file_reader.interface.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024));
+        const content = try std.Io.Dir.cwd().readFileAlloc(self.config.io, path, self.allocator, .limited(10 * 1024 * 1024));
         defer self.allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
         defer parsed.deinit();
+        const root = ju.object(parsed.value) orelse return LoadError.InvalidJson;
 
-        const root = switch (parsed.value) {
-            .object => |o| o,
-            else => return LoadError.InvalidJson,
-        };
+        const img = try Image.create(self.allocator);
+        errdefer img.destroy(self.allocator);
+        const a = img.allocator();
 
-        const img = try self.allocator.create(Image);
-        errdefer self.allocator.destroy(img);
-
-        img.id = try self.allocator.dupe(u8, (root.get("Id") orelse return LoadError.MissingId).string);
-        img.created = if (root.get("Created")) |v| v.integer else 0;
-        img.size = if (root.get("Size")) |v| v.integer else 0;
-        img.architecture = try self.allocator.dupe(u8, if (root.get("Architecture")) |v| v.string else "amd64");
-        img.os = try self.allocator.dupe(u8, if (root.get("Os")) |v| v.string else "linux");
-        img.repo_tags = if (root.get("RepoTags")) |v| try parseStringSlice(v, self.allocator) else &.{};
-        img.repo_digests = if (root.get("RepoDigests")) |v| try parseStringSlice(v, self.allocator) else &.{};
-
-        img.rootfs = .{ .layers = &.{} };
-        if (root.get("RootFS")) |rfs| {
-            if (rfs == .object) {
-                if (rfs.object.get("Layers")) |layers| {
-                    img.rootfs.layers = try parseStringSlice(layers, self.allocator);
-                }
-            }
+        img.id = try a.dupe(u8, ju.str(root.get("Id")) orelse return LoadError.MissingId);
+        img.created = ju.int(root.get("Created")) orelse 0;
+        img.size = ju.int(root.get("Size")) orelse 0;
+        img.architecture = try a.dupe(u8, ju.str(root.get("Architecture")) orelse "amd64");
+        img.os = try a.dupe(u8, ju.str(root.get("Os")) orelse "linux");
+        img.repo_tags = try ju.strings(a, root.get("RepoTags"));
+        img.repo_digests = try ju.strings(a, root.get("RepoDigests"));
+        if (ju.object(root.get("RootFS"))) |rfs| img.rootfs.layers = try ju.strings(a, rfs.get("Layers"));
+        if (ju.object(root.get("Config"))) |cfg| {
+            img.config = .{
+                .cmd = try ju.strings(a, cfg.get("Cmd")),
+                .entrypoint = try ju.strings(a, cfg.get("Entrypoint")),
+                .env = try ju.strings(a, cfg.get("Env")),
+                .working_dir = try a.dupe(u8, ju.str(cfg.get("WorkingDir")) orelse ""),
+                .user = try a.dupe(u8, ju.str(cfg.get("User")) orelse ""),
+                .exposed_ports = try ju.keys(a, cfg.get("ExposedPorts")),
+            };
         }
-
-        img.config = .{
-            .exposesd_ports = std.StringHashMap(void).init(self.allocator),
-        };
-
         return img;
     }
 
-    pub fn saveImageToDisk(self: *ImageService, img: *const Image) !void {
-        var hash = img.id;
-        if (std.mem.startsWith(u8, hash, "sha256:")) {
-            hash = hash[7..];
-        }
+    fn saveImageToDisk(self: *ImageService, img: *const Image) !void {
         var path_buf: [512]u8 = undefined;
-        const img_path = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, hash });
-
-        const file = try std.Io.Dir.createFileAbsolute(self.config.io, img_path, .{});
-        defer file.close(self.config.io);
-
-        var write_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(self.config.io, &write_buf);
-        var writer = &file_writer.interface;
-
-        try writer.writeAll("{");
-        try writer.print("\"Id\":\"{s}\",", .{img.id});
-        try writer.print("\"Created\":{d},", .{img.created});
-        try writer.print("\"Size\":{d},", .{img.size});
-        try writer.print("\"Architecture\":\"{s}\",", .{img.architecture});
-        try writer.print("\"Os\":\"{s}\",", .{img.os});
-
-        try writer.writeAll("\"RepoTags\":[");
-        for (img.repo_tags, 0..) |t, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.print("\"{s}\"", .{t});
-        }
-        try writer.writeAll("],");
-
-        try writer.writeAll("\"RepoDigests\":[");
-        for (img.repo_digests, 0..) |d, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.print("\"{s}\"", .{d});
-        }
-        try writer.writeAll("],");
-
-        try writer.writeAll("\"RootFS\":{\"Layers\":[");
-        for (img.rootfs.layers, 0..) |l, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.print("\"{s}\"", .{l});
-        }
-        try writer.writeAll("]}");
-        try writer.writeAll("}");
+        try fsutil.writeJsonAtomic(self.config.io, self.allocator, try self.imagePath(img.id, &path_buf), img.*);
     }
 
     pub fn tagImage(self: *ImageService, name: []const u8, repo: []const u8, tag_val: []const u8) !void {
-        self.lock.lockSharedUncancelable(self.config.io);
-        const img = try self.getImage(name);
-        self.lock.unlockShared(self.config.io);
-
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
-        const new_tag = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ repo, tag_val });
-        errdefer self.allocator.free(new_tag);
+        const img = try self.getImageLocked(name);
+        var tag_buf: [512]u8 = undefined;
+        const new_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ repo, tag_val });
 
-        if (self.by_tag.contains(new_tag)) {
-            self.allocator.free(new_tag);
-            return;
+        // Retagging moves the tag, as in Docker.
+        if (self.by_tag.get(new_tag)) |prev| {
+            if (prev == img) return;
+            try self.untag(prev, new_tag);
         }
 
-        var new_tags = try self.allocator.alloc([]const u8, img.repo_tags.len + 1);
-        @memcpy(new_tags[0..img.repo_tags.len], img.repo_tags);
-        new_tags[img.repo_tags.len] = new_tag;
-
-        const old_tags = img.repo_tags;
-        img.repo_tags = new_tags;
-        if (old_tags.len > 0) self.allocator.free(old_tags);
-
-        try self.by_tag.put(new_tag, img);
-        try self.by_tag_hash.put(hashTag(new_tag), img);
-
+        const a = img.allocator();
+        const owned = try a.dupe(u8, new_tag);
+        const tags = try a.alloc([]const u8, img.repo_tags.len + 1);
+        @memcpy(tags[0..img.repo_tags.len], img.repo_tags);
+        tags[img.repo_tags.len] = owned;
+        img.repo_tags = tags;
+        try self.by_tag.put(owned, img);
         try self.saveImageToDisk(img);
     }
 
-    pub fn removeImage(self: *ImageService, name: []const u8, force: bool, noprune: bool) ![]RemoveResponseItem {
-        _ = force;
-        _ = noprune;
-        self.lock.lockUncancelable(self.config.io);
-        defer self.lock.unlock(self.config.io);
-
-        var tag_buf: [256]u8 = undefined;
-        const target_tag = if (std.mem.indexOfScalar(u8, name, ':') != null)
-            name
-        else
-            std.fmt.bufPrint(&tag_buf, "{s}:latest", .{name}) catch name;
-
-        var found_img: ?*Image = self.by_tag.get(target_tag);
-        const tag_to_remove: ?[]const u8 = if (found_img != null) target_tag else null;
-
-        var is_id_match = false;
-        if (found_img == null) {
-            if (self.by_id.get(name)) |img| {
-                found_img = img;
-                is_id_match = true;
-            } else {
-                var prefix_match: ?*Image = null;
-                var it2 = self.by_id.iterator();
-                while (it2.next()) |entry| {
-                    if (std.mem.startsWith(u8, entry.key_ptr.*, name)) {
-                        if (prefix_match != null) return CrateError.ImageNotFound;
-                        prefix_match = entry.value_ptr.*;
-                    }
-                }
-                if (prefix_match) |img| {
-                    found_img = img;
-                    is_id_match = true;
-                }
+    /// Drops `tag` from `img`. Caller holds the write lock.
+    fn untag(self: *ImageService, img: *Image, tag: []const u8) !void {
+        _ = self.by_tag.remove(tag);
+        const tags = try img.allocator().alloc([]const u8, img.repo_tags.len);
+        var n: usize = 0;
+        for (img.repo_tags) |t| {
+            if (!std.mem.eql(u8, t, tag)) {
+                tags[n] = t;
+                n += 1;
             }
         }
+        img.repo_tags = tags[0..n];
+        try self.saveImageToDisk(img);
+    }
 
-        const img = found_img orelse return CrateError.ImageNotFound;
+    /// Untags `name`, deleting the image once no tags remain (or when `name`
+    /// is an id). Response strings are allocated with `allocator`.
+    pub fn removeImage(self: *ImageService, allocator: std.mem.Allocator, name: []const u8, force: bool) ![]RemoveResponseItem {
+        _ = force;
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
 
         var response = std.ArrayList(RemoveResponseItem).empty;
-        errdefer response.deinit(self.allocator);
+        errdefer response.deinit(allocator);
 
-        if (is_id_match or img.repo_tags.len <= 1) {
-            for (img.repo_tags) |t| {
-                _ = self.by_tag.remove(t);
-                try response.append(self.allocator, .{ .untagged = try self.allocator.dupe(u8, t) });
+        var tag_buf: [512]u8 = undefined;
+        const tag = try withDefaultTag(name, &tag_buf);
+        if (self.by_tag.get(tag)) |img| {
+            if (img.repo_tags.len > 1) {
+                try response.append(allocator, .{ .untagged = try allocator.dupe(u8, tag) });
+                try self.untag(img, tag);
+                return response.toOwnedSlice(allocator);
             }
-
-            var hash = img.id;
-            if (std.mem.startsWith(u8, hash, "sha256:")) hash = hash[7..];
-            var path_buf: [512]u8 = undefined;
-            const img_path = try std.fmt.bufPrint(&path_buf, "{s}/image/overlay2/imagedb/content/sha256/{s}", .{ self.config.data_root, hash });
-            std.Io.Dir.deleteFileAbsolute(self.config.io, img_path) catch |err| {
-                std.log.warn("failed to delete image file {s}: {}", .{ img_path, err });
-            };
-
-            _ = self.by_id.remove(img.id);
-            try response.append(self.allocator, .{ .deleted = try self.allocator.dupe(u8, img.id) });
-
-            self.allocator.free(img.id);
-            for (img.repo_tags) |t| self.allocator.free(t);
-            self.allocator.free(img.repo_tags);
-            for (img.repo_digests) |d| self.allocator.free(d);
-            self.allocator.free(img.repo_digests);
-            self.allocator.destroy(img);
-        } else {
-            _ = self.by_tag.remove(tag_to_remove.?);
-
-            var new_tags = try self.allocator.alloc([]const u8, img.repo_tags.len - 1);
-            var idx: usize = 0;
-            for (img.repo_tags) |t| {
-                if (std.mem.eql(u8, t, tag_to_remove.?)) {
-                    try response.append(self.allocator, .{ .untagged = try self.allocator.dupe(u8, t) });
-                    self.allocator.free(t);
-                } else {
-                    new_tags[idx] = t;
-                    idx += 1;
-                }
-            }
-            const old_tags = img.repo_tags;
-            img.repo_tags = new_tags;
-            self.allocator.free(old_tags);
-            try self.saveImageToDisk(img);
         }
 
-        return try response.toOwnedSlice(self.allocator);
+        const img = try self.getImageLocked(name);
+        for (img.repo_tags) |t| {
+            _ = self.by_tag.remove(t);
+            try response.append(allocator, .{ .untagged = try allocator.dupe(u8, t) });
+        }
+        try response.append(allocator, .{ .deleted = try allocator.dupe(u8, img.id) });
+
+        var path_buf: [512]u8 = undefined;
+        const img_path = try self.imagePath(img.id, &path_buf);
+        std.Io.Dir.deleteFileAbsolute(self.config.io, img_path) catch |err| {
+            std.log.warn("failed to delete image file {s}: {}", .{ img_path, err });
+        };
+        _ = self.by_id.remove(img.id);
+        img.destroy(self.allocator);
+
+        return response.toOwnedSlice(allocator);
     }
 
+    /// Registry pulls land in Phase 2. Until then this fails loudly instead
+    /// of fabricating an image with no layers.
     pub fn pullImage(self: *ImageService, from_image: []const u8, tag_val: []const u8) !*Image {
-        self.lock.lockUncancelable(self.config.io);
-        defer self.lock.unlock(self.config.io);
-
-        var repo = from_image;
-        var tag_str = tag_val;
-        if (std.mem.indexOfScalar(u8, from_image, ':')) |colon| {
-            repo = from_image[0..colon];
-            tag_str = from_image[colon + 1 ..];
-        }
-
-        var tag_buf: [256]u8 = undefined;
-        const target_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ repo, tag_str });
-
-        if (self.by_tag.get(target_tag)) |img| return img;
-
-        var bytes: [32]u8 = undefined;
-        try self.config.io.randomSecure(&bytes);
-        var hex_buf: [64]u8 = undefined;
-        @memcpy(&hex_buf, std.fmt.bytesToHex(bytes, .lower)[0..64]);
-
-        const full_id = try std.fmt.allocPrint(self.allocator, "sha256:{s}", .{hex_buf});
-        errdefer self.allocator.free(full_id);
-
-        var repo_tags = try self.allocator.alloc([]const u8, 1);
-        errdefer self.allocator.free(repo_tags);
-
-        repo_tags[0] = try self.allocator.dupe(u8, target_tag);
-        errdefer self.allocator.free(repo_tags[0]);
-
-        const img = try self.allocator.create(Image);
-        errdefer {
-            self.allocator.free(full_id);
-            self.allocator.free(repo_tags[0]);
-            self.allocator.free(repo_tags);
-            self.allocator.destroy(img);
-        }
-
-        const arch = try self.allocator.dupe(u8, "amd64");
-        errdefer self.allocator.free(arch);
-
-        const os_name = try self.allocator.dupe(u8, "linux");
-        errdefer self.allocator.free(os_name);
-
-        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
-
-        img.* = .{
-            .id = full_id,
-            .repo_tags = repo_tags,
-            .repo_digests = &.{},
-            .created = @intCast(now),
-            .architecture = arch,
-            .os = os_name,
-            .size = 1000,
-            .rootfs = .{ .layers = &.{} },
-            .config = .{
-                .exposesd_ports = std.StringHashMap(void).init(self.allocator),
-            },
-        };
-
-        self.saveImageToDisk(img) catch {};
-        try self.by_id.put(img.id, img);
-        try self.by_tag.put(img.repo_tags[0], img);
-
-        return img;
+        _ = self;
+        _ = from_image;
+        _ = tag_val;
+        return error.NotImplemented;
     }
 };
+
+/// Appends ":latest" when `ref` has no tag. A ':' before the last '/' is a
+/// registry port ("localhost:5000/app"), not a tag.
+fn withDefaultTag(ref: []const u8, buf: []u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, ref, '@') != null) return ref;
+    const last_slash = std.mem.lastIndexOfScalar(u8, ref, '/') orelse 0;
+    if (std.mem.lastIndexOfScalar(u8, ref, ':')) |colon| if (colon > last_slash) return ref;
+    return std.fmt.bufPrint(buf, "{s}:latest", .{ref});
+}
 
 pub const RemoveResponseItem = struct {
     untagged: ?[]const u8 = null,
@@ -470,14 +283,49 @@ pub const RemoveResponseItem = struct {
     }
 };
 
-fn parseStringSlice(val: std.json.Value, allocator: std.mem.Allocator) ![][]const u8 {
-    const arr = switch (val) {
-        .array => |a| a,
-        else => return &.{},
-    };
-    const result = try allocator.alloc([]const u8, arr.items.len);
-    for (arr.items, 0..) |item, i| {
-        result[i] = try allocator.dupe(u8, item.string);
+test "withDefaultTag handles registry ports and digests" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("alpine:latest", try withDefaultTag("alpine", &buf));
+    try std.testing.expectEqualStrings("alpine:3.20", try withDefaultTag("alpine:3.20", &buf));
+    try std.testing.expectEqualStrings("localhost:5000/app:latest", try withDefaultTag("localhost:5000/app", &buf));
+    try std.testing.expectEqualStrings("app@sha256:ab", try withDefaultTag("app@sha256:ab", &buf));
+}
+
+test "image metadata round-trips through disk" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.createDirPath(.cwd(), io, try std.fmt.bufPrint(&dir_buf, "{s}/image/overlay2/imagedb/content/sha256", .{root}));
+
+    var cfg = DaemonConfig.init(io);
+    cfg.data_root = root;
+    {
+        var svc = try ImageService.init(gpa, cfg);
+        defer svc.deinit();
+        const img = try Image.create(gpa);
+        img.id = "sha256:abcdef0123";
+        img.repo_tags = &.{"app:1"};
+        img.config.cmd = &.{ "echo", "a \"quoted\" arg" };
+        try svc.saveImageToDisk(img);
+        img.destroy(gpa);
     }
-    return result;
+
+    var svc = try ImageService.init(gpa, cfg);
+    defer svc.deinit();
+    const img = try svc.getImage("app:1");
+    try std.testing.expectEqualStrings("a \"quoted\" arg", img.config.cmd[1]);
+    try std.testing.expect(try svc.getImage("abcdef") == img);
+
+    try svc.tagImage("app:1", "app", "2");
+    const removed = try svc.removeImage(gpa, "app:1", false);
+    defer {
+        for (removed) |r| if (r.untagged) |u| gpa.free(u);
+        gpa.free(removed);
+    }
+    try std.testing.expect(try svc.getImage("app:2") == img);
+    try std.testing.expectError(CrateError.ImageNotFound, svc.getImage("app:1"));
 }
