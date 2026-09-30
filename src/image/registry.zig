@@ -27,16 +27,27 @@ pub const Client = struct {
     creds: ?Credentials,
     /// Plain HTTP (insecure registry, or localhost).
     plain_http: bool,
-    /// "Bearer <token>" or "Basic <b64>" once authenticated.
+    /// "Bearer <token>" or "Basic <b64>" once authenticated. Replaced (never
+    /// freed early) on re-auth so concurrent downloads can keep using an old
+    /// value; all values are freed in deinit.
     auth: ?[]u8 = null,
+    auth_history: std.ArrayList([]u8) = .empty,
+    auth_mutex: std.Io.Mutex = .init,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ref: Reference, creds: ?Credentials, plain_http: bool) Client {
         return .{ .gpa = gpa, .http = .{ .allocator = gpa, .io = io }, .ref = ref, .creds = creds, .plain_http = plain_http };
     }
 
     pub fn deinit(self: *Client) void {
-        if (self.auth) |a| self.gpa.free(a);
+        for (self.auth_history.items) |a| self.gpa.free(a);
+        self.auth_history.deinit(self.gpa);
         self.http.deinit();
+    }
+
+    fn currentAuth(self: *Client) ?[]const u8 {
+        self.auth_mutex.lockUncancelable(self.http.io);
+        defer self.auth_mutex.unlock(self.http.io);
+        return self.auth;
     }
 
     /// Fetches a manifest or index and verifies it against `expected` when
@@ -86,7 +97,8 @@ pub const Client = struct {
                 extra_buf[0] = .{ .name = "Accept", .value = acc };
                 break :blk extra_buf[0..1];
             } else &.{};
-            const auth: http.Client.Request.Headers.Value = if (send_auth and self.auth != null) .{ .override = self.auth.? } else .omit;
+            const current = self.currentAuth();
+            const auth: http.Client.Request.Headers.Value = if (send_auth and current != null) .{ .override = current.? } else .omit;
 
             var req = try self.http.request(.GET, try std.Uri.parse(target), .{
                 .extra_headers = extra,
@@ -188,8 +200,12 @@ pub const Client = struct {
     /// Takes ownership of `value`.
     fn setAuth(self: *Client, scheme: []const u8, value: []u8) !void {
         defer self.gpa.free(value);
-        if (self.auth) |a| self.gpa.free(a);
-        self.auth = try std.fmt.allocPrint(self.gpa, "{s} {s}", .{ scheme, value });
+        const next = try std.fmt.allocPrint(self.gpa, "{s} {s}", .{ scheme, value });
+        errdefer self.gpa.free(next);
+        self.auth_mutex.lockUncancelable(self.http.io);
+        defer self.auth_mutex.unlock(self.http.io);
+        try self.auth_history.append(self.gpa, next);
+        self.auth = next;
     }
 };
 

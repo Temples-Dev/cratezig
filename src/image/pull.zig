@@ -72,22 +72,7 @@ pub fn pull(svc: *ImageService, raw_ref: []const u8, opts: Options, progress: Pr
     if (cfg.diff_ids.len != man.layers.len) return error.InvalidImageConfig;
     const chain = try layers.chainIds(a, cfg.diff_ids);
 
-    var downloaded = false;
-    for (man.layers, 0..) |layer, i| {
-        const short = content.hex(layer.desc.digest)[0..12];
-        if (svc.layers.exists(&chain[i])) {
-            progress.emit(short, "Already exists", 0, 0);
-            continue;
-        }
-        downloaded = true;
-        progress.emit(short, "Pulling fs layer", 0, 0);
-        var tracker: Tracker = .{ .progress = progress, .id = short, .total = layer.desc.size };
-        try client.fetchBlob(&svc.content, layer.desc, &tracker);
-        progress.emit(short, "Download complete", 0, 0);
-        progress.emit(short, "Extracting", 0, layer.desc.size);
-        try extract(svc, layer, cfg.diff_ids[i], &chain[i], if (i > 0) &chain[i - 1] else null);
-        progress.emit(short, "Pull complete", 0, 0);
-    }
+    const downloaded = try fetchLayers(svc, &client, man.layers, cfg.diff_ids, chain, progress);
 
     var tag_buf: [512]u8 = undefined;
     var digest_buf: [512]u8 = undefined;
@@ -113,6 +98,104 @@ pub fn pull(svc: *ImageService, raw_ref: []const u8, opts: Options, progress: Pr
 
     return .{ .image = try svc.addImage(img), .up_to_date = !downloaded, .digest = manifest_digest };
 }
+
+const max_parallel_downloads = 3;
+
+const Job = struct {
+    desc: manifest.Descriptor,
+    short: []const u8,
+    done: std.Io.Event = .unset,
+    err: ?anyerror = null,
+};
+
+/// Downloads missing layers on up to three threads while this thread
+/// extracts them in order (each layer needs its parent). Returns whether
+/// anything was downloaded.
+fn fetchLayers(svc: *ImageService, client: *registry.Client, man_layers: []const manifest.Layer, diff_ids: []const []const u8, chain: []const [71]u8, raw_progress: Progress) !bool {
+    const io = svc.config.io;
+    var sync: SyncProgress = .{ .inner = raw_progress, .io = io };
+    const progress = sync.progress();
+
+    var jobs_buf: [128]Job = undefined;
+    if (man_layers.len > jobs_buf.len) return error.TooManyLayers;
+    var job_of: [128]?*Job = @splat(null);
+    var n_jobs: usize = 0;
+    for (man_layers, 0..) |layer, i| {
+        const short = content.hex(layer.desc.digest)[0..12];
+        if (svc.layers.exists(&chain[i])) {
+            progress.emit(short, "Already exists", 0, 0);
+            continue;
+        }
+        progress.emit(short, "Pulling fs layer", 0, 0);
+        jobs_buf[n_jobs] = .{ .desc = layer.desc, .short = short };
+        job_of[i] = &jobs_buf[n_jobs];
+        n_jobs += 1;
+    }
+    if (n_jobs == 0) return false;
+
+    var pool: Downloader = .{ .client = client, .store = &svc.content, .progress = progress, .jobs = jobs_buf[0..n_jobs], .io = io };
+    var threads: [max_parallel_downloads]std.Thread = undefined;
+    var n_threads: usize = 0;
+    // Workers reference this frame: always stop and join them before returning.
+    defer {
+        pool.cancelled.store(true, .release);
+        for (threads[0..n_threads]) |t| t.join();
+    }
+    while (n_threads < @min(max_parallel_downloads, n_jobs)) : (n_threads += 1) {
+        threads[n_threads] = try std.Thread.spawn(.{}, Downloader.worker, .{&pool});
+    }
+
+    for (man_layers, 0..) |layer, i| {
+        const job = job_of[i] orelse continue;
+        job.done.waitUncancelable(io);
+        if (job.err) |err| return err;
+        progress.emit(job.short, "Extracting", 0, layer.desc.size);
+        try extract(svc, layer, diff_ids[i], &chain[i], if (i > 0) &chain[i - 1] else null);
+        progress.emit(job.short, "Pull complete", 0, 0);
+    }
+    return true;
+}
+
+const Downloader = struct {
+    client: *registry.Client,
+    store: *const content.Store,
+    progress: Progress,
+    jobs: []Job,
+    io: std.Io,
+    next: std.atomic.Value(usize) = .init(0),
+    cancelled: std.atomic.Value(bool) = .init(false),
+
+    fn worker(self: *Downloader) void {
+        while (!self.cancelled.load(.acquire)) {
+            const i = self.next.fetchAdd(1, .acq_rel);
+            if (i >= self.jobs.len) return;
+            const job = &self.jobs[i];
+            var tracker: Tracker = .{ .progress = self.progress, .id = job.short, .total = job.desc.size };
+            if (self.client.fetchBlob(self.store, job.desc, &tracker)) {
+                self.progress.emit(job.short, "Download complete", 0, 0);
+            } else |err| job.err = err;
+            job.done.set(self.io);
+        }
+    }
+};
+
+/// Serializes progress callbacks from download threads.
+const SyncProgress = struct {
+    inner: Progress,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+
+    fn progress(self: *SyncProgress) Progress {
+        return .{ .ctx = self, .emitFn = emit };
+    }
+
+    fn emit(ctx: *anyopaque, id: []const u8, status: []const u8, current: u64, total: u64) void {
+        const self: *SyncProgress = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.inner.emit(id, status, current, total);
+    }
+};
 
 /// Decompresses a stored layer blob into a fresh layer dir, checking the
 /// uncompressed stream against the config's diff_id before committing.
