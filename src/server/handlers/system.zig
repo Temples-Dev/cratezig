@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
 const Daemon = @import("../../daemon/daemon.zig").Daemon;
@@ -13,29 +14,47 @@ pub fn handlePing(req: Request, alloc: std.mem.Allocator) !Response {
     };
 }
 
+pub const engine_version = "24.0.0-cratezig";
+pub const api_version = "1.43";
+pub const min_api_version = "1.24";
+
+fn goArch() []const u8 {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => "amd64",
+        .aarch64 => "arm64",
+        .arm => "arm",
+        .riscv64 => "riscv64",
+        else => @tagName(builtin.cpu.arch),
+    };
+}
+
 pub fn handleVersion(req: Request, alloc: std.mem.Allocator) !Response {
     _ = req;
-    const body = try std.fmt.allocPrint(alloc,
-        \\{{
-        \\  "Platform": {{"Name":"cratezig/linux"}},
-        \\  "Components": [
-        \\    {{"Name":"Engine","Version":"24.0.0-cratezig","Details":{{"Compiler":"Zig 0.16.0"}}}}
-        \\  ],
-        \\  "Version": "24.0.0-cratezig",
-        \\  "ApiVersion": "1.43",
-        \\  "MinAPIVersion": "1.24",
-        \\  "GitCommit": "036bed1",
-        \\  "ZigVersion": "0.16.0",
-        \\  "Os": "linux",
-        \\  "Arch": "amd64"
-        \\}}
-    , .{});
-
-    return Response{
-        .status = 200,
-        .content_type = "application/json",
-        .body = body,
+    var uts: std.os.linux.utsname = undefined;
+    _ = std.os.linux.uname(&uts);
+    const kernel = std.mem.sliceTo(&uts.release, 0);
+    const details = .{
+        .ApiVersion = api_version,
+        .MinAPIVersion = min_api_version,
+        .GitCommit = "",
+        .GoVersion = "zig " ++ builtin.zig_version_string,
+        .Os = "linux",
+        .Arch = goArch(),
+        .KernelVersion = kernel,
     };
+    const body = try std.json.Stringify.valueAlloc(alloc, .{
+        .Platform = .{ .Name = "Cratezig Engine" },
+        .Components = .{.{ .Name = "Engine", .Version = engine_version, .Details = details }},
+        .Version = engine_version,
+        .ApiVersion = api_version,
+        .MinAPIVersion = min_api_version,
+        .GitCommit = "",
+        .GoVersion = details.GoVersion,
+        .Os = "linux",
+        .Arch = goArch(),
+        .KernelVersion = kernel,
+    }, .{});
+    return Response.ok(body);
 }
 
 pub fn handleInfo(req: Request, alloc: std.mem.Allocator) !Response {
@@ -106,6 +125,6 @@ test "system discovery endpoints serialization" {
     defer alloc.free(ver_resp.body);
 
     try std.testing.expectEqual(@as(u16, 200), ver_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, ver_resp.body, "\"ZigVersion\": \"0.16.0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ver_resp.body, "\"ApiVersion\": \"1.43\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ver_resp.body, "\"ApiVersion\":\"1.43\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ver_resp.body, "\"MinAPIVersion\":\"1.24\"") != null);
 }

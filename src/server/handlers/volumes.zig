@@ -83,7 +83,7 @@ pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
 pub fn remove(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     _ = alloc;
     const name = req.params.get("name") orelse return Response.badRequest("missing name");
-    const force = if (req.query.get("force")) |f| std.mem.eql(u8, f, "true") else false;
+    const force = req.queryBool("force");
 
     daemon.volumes.deleteVolume(name, force) catch |err| {
         return Response.fromError(err);

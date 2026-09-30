@@ -20,6 +20,9 @@ pub const Response = struct {
     pub fn badRequest(msg: []const u8) Response {
         return errBody(400, msg);
     }
+    pub fn payloadTooLarge(msg: []const u8) Response {
+        return errBody(413, msg);
+    }
     pub fn notFound(msg: []const u8) Response {
         return errBody(404, msg);
     }
@@ -29,26 +32,43 @@ pub const Response = struct {
     pub fn internalError(msg: []const u8) Response {
         return errBody(500, msg);
     }
+    pub fn notImplemented(msg: []const u8) Response {
+        return errBody(501, msg);
+    }
 
     pub fn fromError(err: anyerror) Response {
         const code: u16 = switch (err) {
             error.ContainerNotFound,
             error.ImageNotFound,
             error.NetworkNotFound,
-            error.VolumeNotFound => 404,
+            error.VolumeNotFound,
+            error.ExecNotFound,
+            => 404,
             error.ContainerAlreadyRunning => 304,
             error.ContainerNameInUse,
             error.ContainerBeingRemoved,
+            error.ContainerNotRunning,
+            error.ContainerAlreadyPaused,
+            error.ContainerNotPaused,
+            error.NetworkAlreadyExists,
             error.NetworkHasEndpoints,
-            error.VolumeInUse => 409,
+            error.ImageInUse,
+            error.VolumeInUse,
+            => 409,
             error.InvalidParameter,
-            error.NoCommandSpecified => 400,
+            error.NoCommandSpecified,
+            error.UserNotFound,
+            error.GroupNotFound,
+            => 400,
+            error.Forbidden => 403,
+            error.NotImplemented => 501,
             else => 500,
         };
         return errBody(code, @errorName(err));
     }
 
-    fn errBody(status: u16, msg: []const u8) Response {
+    /// The server wraps non-JSON error bodies as {"message": ...}.
+    pub fn errBody(status: u16, msg: []const u8) Response {
         return .{ .status = status, .body = msg };
     }
 

@@ -5,6 +5,7 @@ const Response = @import("response.zig").Response;
 const PathParams = @import("request.zig").PathParams;
 
 const ch = @import("handlers/container.zig");
+const cc = @import("handlers/container_create.zig");
 const ih = @import("handlers/images.zig");
 const nh = @import("handlers/networks.zig");
 const vh = @import("handlers/volumes.zig");
@@ -31,7 +32,7 @@ const ROUTES = [_]Route{
 
     // ── Containers ───────────────────────────────────────────────────────────
     .{ .method = "GET", .pattern = "/containers/json", .handler = ch.list },
-    .{ .method = "POST", .pattern = "/containers/create", .handler = ch.create },
+    .{ .method = "POST", .pattern = "/containers/create", .handler = cc.create },
     .{ .method = "POST", .pattern = "/containers/{name}/start", .handler = ch.start },
     .{ .method = "POST", .pattern = "/containers/{name}/stop", .handler = ch.stop },
     .{ .method = "POST", .pattern = "/containers/{name}/restart", .handler = ch.restart },
@@ -119,7 +120,7 @@ pub fn dispatch(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respon
             .disk_usage => return sh.diskUsage(daemon, req, alloc),
             .build => return bh.build(daemon, req, alloc),
             .container_list => return ch.list(daemon, req, alloc),
-            .container_create => return ch.create(daemon, req, alloc),
+            .container_create => return cc.create(daemon, req, alloc),
             .container_prune => return ch.prune(daemon, req, alloc),
             .image_list => return ih.list(daemon, req, alloc),
             .image_create => return ih.pull(daemon, req, alloc),

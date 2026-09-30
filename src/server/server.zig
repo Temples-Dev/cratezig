@@ -1,8 +1,7 @@
 const std = @import("std");
 const Daemon = @import("../daemon/daemon.zig").Daemon;
 const router = @import("router.zig");
-const parseRequest = @import("request.zig").parseRequest;
-const decodeChunked = @import("request.zig").decodeChunked;
+const request = @import("request.zig");
 const Response = @import("response.zig").Response;
 
 pub const Server = struct {
@@ -15,26 +14,37 @@ pub const Server = struct {
     }
 
     pub fn listen(self: *Server) !void {
+        const io = self.daemon.config.io;
         var path_buf: [256:0]u8 = undefined;
-        if (std.fmt.bufPrintZ(&path_buf, "{s}", .{self.socket_path})) |pathZ| {
-            _ = std.os.linux.unlink(pathZ.ptr);
-        } else |_| {}
+        const path_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{self.socket_path});
+        _ = std.os.linux.unlink(path_z.ptr);
 
         const address = try std.Io.net.UnixAddress.init(self.socket_path);
-        var server = try address.listen(self.daemon.config.io, .{
-            .kernel_backlog = std.Io.net.default_kernel_backlog,
-        });
-        defer server.deinit(self.daemon.config.io);
+        var server = try address.listen(io, .{ .kernel_backlog = std.Io.net.default_kernel_backlog });
+        defer server.deinit(io);
 
-        _ = std.os.linux.chmod(&path_buf, 0o666);
-
+        // root + the socket's group only, like /var/run/docker.sock.
+        _ = std.os.linux.chmod(path_z.ptr, 0o660);
         std.log.info("API listening on {s}", .{self.socket_path});
 
         while (true) {
-            const conn = try server.accept(self.daemon.config.io);
-            const ctx = try self.allocator.create(ConnContext);
+            // A failed accept (e.g. EMFILE) must not take the daemon down.
+            const conn = server.accept(io) catch |err| {
+                std.log.err("accept failed: {}", .{err});
+                std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+                continue;
+            };
+            const ctx = self.allocator.create(ConnContext) catch {
+                conn.close(io);
+                continue;
+            };
             ctx.* = .{ .daemon = self.daemon, .conn = conn, .allocator = self.allocator };
-            const thread = try std.Thread.spawn(.{}, handleConnection, .{ctx});
+            const thread = std.Thread.spawn(.{}, handleConnection, .{ctx}) catch |err| {
+                std.log.err("cannot spawn connection thread: {}", .{err});
+                conn.close(io);
+                self.allocator.destroy(ctx);
+                continue;
+            };
             thread.detach();
         }
     }
@@ -46,99 +56,122 @@ const ConnContext = struct {
     allocator: std.mem.Allocator,
 };
 
+const max_head_size = 64 * 1024;
+const max_body_size: usize = 32 * 1024 * 1024;
+
 fn handleConnection(ctx: *ConnContext) void {
-    std.log.info("handleConnection: accepted connection", .{});
+    const io = ctx.daemon.config.io;
     defer ctx.allocator.destroy(ctx);
-    defer ctx.conn.close(ctx.daemon.config.io);
+    defer ctx.conn.close(io);
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var buf: [8192]u8 = undefined;
-    var read_buf: [1024]u8 = undefined;
-    var reader = ctx.conn.reader(ctx.daemon.config.io, &read_buf);
-    var slices = [_][]u8{&buf};
-    const n = reader.interface.readVec(&slices) catch return;
-    if (n == 0) return;
-    const raw = buf[0..n];
+    var read_buf: [max_head_size]u8 = undefined;
+    var reader = ctx.conn.reader(io, &read_buf);
 
-    var req = parseRequest(raw, alloc) catch return;
-
-    const te = req.headers.get("Transfer-Encoding") orelse req.headers.get("transfer-encoding");
-    const is_chunked = if (te) |val| std.mem.indexOfPos(u8, val, 0, "chunked") != null else false;
-    const is_build = std.mem.indexOf(u8, req.path, "/build") != null;
-    const cl = req.headers.get("Content-Length") orelse req.headers.get("content-length");
-    if (cl) |cl_str| {
-        if (std.fmt.parseInt(usize, cl_str, 10)) |content_len| {
-            if (req.body.len < content_len) {
-                const full_body = alloc.alloc(u8, content_len) catch return;
-                @memcpy(full_body[0..req.body.len], req.body);
-
-                var read_so_far = req.body.len;
-                while (read_so_far < content_len) {
-                    var chunk: [8192]u8 = undefined;
-                    var chunk_slices = [_][]u8{&chunk};
-                    const bytes_read = reader.interface.readVec(&chunk_slices) catch break;
-                    if (bytes_read == 0) break;
-                    const to_copy = @min(bytes_read, content_len - read_so_far);
-                    @memcpy(full_body[read_so_far .. read_so_far + to_copy], chunk[0..to_copy]);
-                    read_so_far += to_copy;
-                }
-                req.body = full_body[0..read_so_far];
-            }
-        } else |_| {}
-    } else if (is_chunked or is_build) {
-        var body_list = std.ArrayList(u8).empty;
-        defer body_list.deinit(alloc);
-        if (req.body.len > 0) {
-            body_list.appendSlice(alloc, req.body) catch return;
-        }
-
-        while (true) {
-            var read_chunk: [8192]u8 = undefined;
-            var chunk_slices = [_][]u8{&read_chunk};
-            const bytes_read = reader.interface.readVec(&chunk_slices) catch break;
-            if (bytes_read == 0) break;
-            body_list.appendSlice(alloc, read_chunk[0..bytes_read]) catch break;
-            if (std.mem.endsWith(u8, body_list.items, "0\r\n\r\n")) break;
-        }
-        const full_raw = body_list.toOwnedSlice(alloc) catch return;
-        if (is_chunked) {
-            req.body = decodeChunked(alloc, full_raw) catch full_raw;
-        } else {
-            req.body = full_raw;
-        }
-    }
-
-    const res = router.dispatch(ctx.daemon, &req, alloc);
-
-    writeResponse(ctx.daemon.config.io, ctx.conn, res) catch |err| {
-        std.log.err("handleConnection: write error: {}", .{err});
+    const res = handleRequest(ctx.daemon, &reader.interface, alloc) catch |err| switch (err) {
+        error.EndOfStream, error.ReadFailed => return,
+        error.StreamTooLong => Response.errBody(431, "request header too large"),
+        error.PayloadTooLarge => Response.errBody(413, "request body too large"),
+        error.OutOfMemory => Response.internalError("out of memory"),
+        else => Response.badRequest("malformed HTTP request"),
     };
-    std.log.info("handleConnection: done response", .{});
+
+    writeResponse(io, ctx.conn, alloc, res) catch |err| {
+        std.log.warn("write response failed: {}", .{err});
+    };
 }
 
-fn writeResponse(io: std.Io, stream: std.Io.net.Stream, res: Response) !void {
-    const status_text = switch (res.status) {
+fn handleRequest(daemon: *Daemon, r: *std.Io.Reader, alloc: std.mem.Allocator) !Response {
+    // Collect the head line by line; a line longer than the reader buffer
+    // yields error.StreamTooLong (431).
+    var head = std.ArrayList(u8).empty;
+    while (true) {
+        const line = try r.takeDelimiterInclusive('\n');
+        if (head.items.len + line.len > max_head_size) return error.StreamTooLong;
+        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+        try head.appendSlice(alloc, line);
+    }
+
+    var req = try request.parseHead(head.items, alloc);
+    req.body = try readBody(r, &req, alloc);
+    return router.dispatch(daemon, &req, alloc);
+}
+
+fn readBody(r: *std.Io.Reader, req: *const request.Request, alloc: std.mem.Allocator) ![]const u8 {
+    if (req.header("transfer-encoding")) |te| {
+        if (std.ascii.indexOfIgnoreCase(te, "chunked") != null) return readChunked(r, alloc);
+    }
+    const cl_str = req.header("content-length") orelse return "";
+    const len = std.fmt.parseInt(usize, cl_str, 10) catch return error.InvalidRequest;
+    if (len > max_body_size) return error.PayloadTooLarge;
+    const body = try alloc.alloc(u8, len);
+    try r.readSliceAll(body);
+    return body;
+}
+
+fn readChunked(r: *std.Io.Reader, alloc: std.mem.Allocator) ![]const u8 {
+    var body = std.ArrayList(u8).empty;
+    while (true) {
+        const size_line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
+        const size_hex = std.mem.trim(u8, size_line[0 .. std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len], " ");
+        const size = std.fmt.parseInt(usize, size_hex, 16) catch return error.InvalidRequest;
+        if (size == 0) break;
+        if (body.items.len + size > max_body_size) return error.PayloadTooLarge;
+        try r.readSliceAll(try body.addManyAsSlice(alloc, size));
+        _ = try r.takeDelimiterInclusive('\n'); // CRLF after chunk data
+    }
+    // Trailer section ends with an empty line.
+    while (std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n").len != 0) {}
+    return body.items;
+}
+
+fn statusText(status: u16) []const u8 {
+    return switch (status) {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
-        else => "OK",
+        501 => "Not Implemented",
+        else => "Unknown",
     };
-    var write_buf: [2048]u8 = undefined;
+}
+
+fn writeResponse(io: std.Io, stream: std.Io.net.Stream, alloc: std.mem.Allocator, res: Response) !void {
+    var write_buf: [4096]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
-    try writer.interface.print("HTTP/1.1 {d} {s}\r\n", .{ res.status, status_text });
-    try writer.interface.print("Content-Type: {s}\r\n", .{ res.content_type });
-    try writer.interface.print("Content-Length: {d}\r\n", .{ res.body.len });
-    try writer.interface.print("Connection: close\r\n\r\n", .{});
-    if (res.body.len > 0) {
-        try writer.interface.writeAll(res.body);
+    const w = &writer.interface;
+
+    // Errors always use Docker's {"message": "..."} shape, properly escaped.
+    const is_error = res.status >= 400;
+    const body = if (is_error and !(res.body.len > 0 and res.body[0] == '{'))
+        try std.json.Stringify.valueAlloc(alloc, .{ .message = res.body }, .{})
+    else
+        res.body;
+    const content_type = if (is_error) "application/json" else res.content_type;
+
+    try w.print("HTTP/1.1 {d} {s}\r\n", .{ res.status, statusText(res.status) });
+    try w.writeAll("Api-Version: 1.43\r\nServer: cratezig\r\n");
+    if (res.status != 204 and res.status != 304) {
+        try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n", .{ content_type, body.len });
     }
-    try writer.interface.flush();
+    try w.writeAll("Connection: close\r\n\r\n");
+    if (res.status != 204 and res.status != 304) try w.writeAll(body);
+    try w.flush();
+}
+
+test "chunked body decoding" {
+    var r = std.Io.Reader.fixed("5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("hello world", try readChunked(&r, arena.allocator()));
 }
