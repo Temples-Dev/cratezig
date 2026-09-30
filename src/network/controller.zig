@@ -7,6 +7,9 @@ const EndpointSettings = @import("../container/container.zig").EndpointSettings;
 
 const bridge = @import("bridge.zig");
 const IPAM = @import("ipam.zig").IPAM;
+const fsutil = @import("../util/fsutil.zig");
+const ju = @import("../util/jsonutil.zig");
+const timefmt = @import("../util/timefmt.zig");
 
 pub const LoadError = error{
     InvalidJson,
@@ -51,6 +54,8 @@ pub const NetworkController = struct {
 
     /// Ensures the default bridge network exists. Called once at startup after init.
     pub fn setup(self: *NetworkController) !void {
+        // Host-side bridge state does not survive reboots; always reconcile.
+        try bridge.setupBridge(self.config.io);
         if (self.by_name.contains("bridge")) return;
 
         const id = try generateId(self.config.io, self.allocator);
@@ -66,15 +71,15 @@ pub const NetworkController = struct {
             .id = id,
             .name = "bridge",
             .driver = "bridge",
-            .created = 0,
+            .created = @intCast(std.Io.Clock.now(.real, self.config.io).toNanoseconds()),
             .ipam = .{ .configs = pools },
         };
 
         try self.by_id.put(net.id, net);
         try self.by_name.put(net.name, net.id);
+        // Persist so the bridge keeps its id (and IPAM) across restarts.
+        try self.saveNetworkToDisk(net);
 
-        // Run bridge setup and initialize IPAM
-        try bridge.setupBridge(self.config.io);
         const ipam_inst = try self.allocator.create(IPAM);
         ipam_inst.* = try IPAM.init(self.allocator, "172.17.0.0/16", "172.17.0.1");
         try self.ipam_pools.put(net.id, ipam_inst);
@@ -85,7 +90,11 @@ pub const NetworkController = struct {
     pub fn get(self: *NetworkController, id_or_name: []const u8) ?*Network {
         self.lock.lockSharedUncancelable(self.config.io);
         defer self.lock.unlockShared(self.config.io);
+        return self.getLocked(id_or_name);
+    }
 
+    /// Lookup for callers already holding `lock` (shared or exclusive).
+    fn getLocked(self: *NetworkController, id_or_name: []const u8) ?*Network {
         if (self.by_id.get(id_or_name)) |net| return net;
         if (self.by_name.get(id_or_name)) |id| return self.by_id.get(id);
         return null;
@@ -105,7 +114,7 @@ pub const NetworkController = struct {
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
-        const net = self.get(net_name) orelse return error.NetworkNotFound;
+        const net = self.getLocked(net_name) orelse return error.NetworkNotFound;
         const ipam = self.ipam_pools.get(net.id) orelse return error.NetworkHasNoIPAMPool;
 
         const ip = try ipam.allocate();
@@ -131,7 +140,7 @@ pub const NetworkController = struct {
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
-        const net = self.get(net_name) orelse return error.NetworkNotFound;
+        const net = self.getLocked(net_name) orelse return error.NetworkNotFound;
         if (self.ipam_pools.get(net.id)) |ipam| {
             ipam.release(ip);
         }
@@ -150,7 +159,7 @@ pub const NetworkController = struct {
 
         var it = dir.iterate();
         while (try it.next(self.config.io)) |entry| {
-            if (entry.kind != .file) continue;
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
 
             var net_path_buf: [512]u8 = undefined;
             const net_path = try std.fmt.bufPrint(&net_path_buf, "{s}/network/files/{s}", .{ self.config.data_root, entry.name });
@@ -166,55 +175,51 @@ pub const NetworkController = struct {
     }
 
     fn loadNetworkFromFile(self: *NetworkController, path: []const u8) !*Network {
-        const file = try std.Io.Dir.openFile(.cwd(), self.config.io, path, .{});
-        defer file.close(self.config.io);
-
-        var read_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(self.config.io, &read_buf);
-        const content = try file_reader.interface.allocRemaining(self.allocator, std.Io.Limit.limited(1 * 1024 * 1024));
+        const content = try std.Io.Dir.cwd().readFileAlloc(self.config.io, path, self.allocator, .limited(1024 * 1024));
         defer self.allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
         defer parsed.deinit();
+        const root = ju.object(parsed.value) orelse return LoadError.InvalidJson;
+        const a = self.allocator;
 
-        const root = switch (parsed.value) {
-            .object => |o| o,
-            else => return LoadError.InvalidJson,
+        const net = try a.create(Network);
+        errdefer a.destroy(net);
+        net.* = .{
+            .id = try a.dupe(u8, ju.str(root.get("Id")) orelse return LoadError.MissingId),
+            .name = try a.dupe(u8, ju.str(root.get("Name")) orelse ""),
+            .driver = try a.dupe(u8, ju.str(root.get("Driver")) orelse "bridge"),
+            .created = if (ju.str(root.get("Created"))) |c| @intCast(timefmt.parseRfc3339(c) orelse 0) else ju.int(root.get("Created")) orelse 0,
+            .internel = ju.boolean(root.get("Internal")) orelse false,
+            .enable_ipv6 = ju.boolean(root.get("EnableIPv6")) orelse false,
+            .ipam = .{},
         };
 
-        const net = try self.allocator.create(Network);
-        errdefer self.allocator.destroy(net);
+        // Restore the address pool so endpoints can be allocated after a restart.
+        const ipam_cfg = ju.object(root.get("IPAM")) orelse return net;
+        const configs = switch (ipam_cfg.get("Config") orelse return net) {
+            .array => |arr| arr,
+            else => return net,
+        };
+        if (configs.items.len == 0) return net;
+        const first = ju.object(configs.items[0]) orelse return net;
+        const subnet = ju.str(first.get("Subnet")) orelse return net;
+        const pools = try a.alloc(IPAMPoolConfig, 1);
+        pools[0] = .{ .subnet = try a.dupe(u8, subnet), .gateway = try a.dupe(u8, ju.str(first.get("Gateway")) orelse "") };
+        net.ipam = .{ .configs = pools };
 
-        net.id = try self.allocator.dupe(u8, (root.get("Id") orelse return LoadError.MissingId).string);
-        net.name = try self.allocator.dupe(u8, if (root.get("Name")) |v| v.string else "");
-        net.driver = try self.allocator.dupe(u8, if (root.get("Driver")) |v| v.string else "bridge");
-        net.created = if (root.get("Created")) |v| v.integer else 0;
-        net.internel = if (root.get("Internal")) |v| v.bool else false;
-        net.enable_ipv6 = if (root.get("EnableIPv6")) |v| v.bool else false;
-        net.ipam = .{};
-
+        if (std.mem.eql(u8, net.driver, "bridge")) {
+            const ipam_inst = try a.create(IPAM);
+            ipam_inst.* = try IPAM.init(a, pools[0].subnet, pools[0].gateway);
+            try self.ipam_pools.put(net.id, ipam_inst);
+        }
         return net;
     }
 
     pub fn saveNetworkToDisk(self: *NetworkController, net: *const Network) !void {
         var path_buf: [512]u8 = undefined;
         const net_path = try std.fmt.bufPrint(&path_buf, "{s}/network/files/{s}.json", .{ self.config.data_root, net.id });
-
-        const file = try std.Io.Dir.createFileAbsolute(self.config.io, net_path, .{});
-        defer file.close(self.config.io);
-
-        var write_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(self.config.io, &write_buf);
-        var writer = &file_writer.interface;
-
-        try writer.writeAll("{");
-        try writer.print("\"Id\":\"{s}\",", .{net.id});
-        try writer.print("\"Name\":\"{s}\",", .{net.name});
-        try writer.print("\"Driver\":\"{s}\",", .{net.driver});
-        try writer.print("\"Created\":{d},", .{net.created});
-        try writer.print("\"Internal\":{},", .{net.internel});
-        try writer.print("\"EnableIPv6\":{}", .{net.enable_ipv6});
-        try writer.writeAll("}");
+        try fsutil.writeJsonAtomic(self.config.io, self.allocator, net_path, net.*);
     }
 
     pub fn createNetwork(self: *NetworkController, name: []const u8, driver: []const u8, subnet: ?[]const u8, gateway: ?[]const u8) !*Network {
@@ -244,7 +249,7 @@ pub const NetworkController = struct {
         const net = try self.allocator.create(Network);
         errdefer self.allocator.destroy(net);
 
-        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
+        const now = std.Io.Clock.now(.real, self.config.io).toNanoseconds();
 
         net.* = .{
             .id = id,
@@ -272,7 +277,7 @@ pub const NetworkController = struct {
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
-        const net = self.get(id_or_name) orelse return error.NetworkNotFound;
+        const net = self.getLocked(id_or_name) orelse return error.NetworkNotFound;
 
         if (std.mem.eql(u8, net.name, "bridge")) {
             return error.Forbidden;

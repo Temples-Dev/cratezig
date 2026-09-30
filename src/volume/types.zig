@@ -1,4 +1,5 @@
 const std = @import("std");
+const timefmt = @import("../util/timefmt.zig");
 
 pub const Volume = struct {
     name: []const u8,
@@ -18,7 +19,8 @@ pub const Volume = struct {
         try jws.objectField("Mountpoint");
         try jws.write(self.mountpoint);
         try jws.objectField("CreatedAt");
-        try jws.write(self.created);
+        var time_buf: [40]u8 = undefined;
+        try jws.write(timefmt.rfc3339(&time_buf, self.created));
         
         try jws.objectField("Labels");
         try jws.beginObject();

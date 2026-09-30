@@ -1,4 +1,5 @@
 const std = @import("std");
+const timefmt = @import("../util/timefmt.zig");
 
 pub const Network = struct {
     id: []const u8,
@@ -18,7 +19,8 @@ pub const Network = struct {
         try jws.objectField("Driver");
         try jws.write(self.driver);
         try jws.objectField("Created");
-        try jws.write(self.created);
+        var time_buf: [40]u8 = undefined;
+        try jws.write(timefmt.rfc3339(&time_buf, self.created));
         try jws.objectField("Internal");
         try jws.write(self.internel);
         try jws.objectField("EnableIPv6");

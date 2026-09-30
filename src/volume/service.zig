@@ -1,4 +1,7 @@
 const std = @import("std");
+const fsutil = @import("../util/fsutil.zig");
+const ju = @import("../util/jsonutil.zig");
+const timefmt = @import("../util/timefmt.zig");
 const DaemonConfig = @import("../config/config.zig").DaemonConfig;
 const Volume = @import("types.zig").Volume;
 
@@ -80,44 +83,21 @@ pub const VolumeService = struct {
         vol.scope = "local";
 
         // opts.json is optional — absence is not a failure
-        const file = std.Io.Dir.openFile(.cwd(), self.config.io, opts_path, .{}) catch return vol;
-        defer file.close(self.config.io);
-
-        var read_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(self.config.io, &read_buf);
-        const content = file_reader.interface.allocRemaining(self.allocator, std.Io.Limit.limited(1 * 1024 * 1024)) catch return vol;
+        const content = std.Io.Dir.cwd().readFileAlloc(self.config.io, opts_path, self.allocator, .limited(1024 * 1024)) catch return vol;
         defer self.allocator.free(content);
-
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, content, .{}) catch return vol;
         defer parsed.deinit();
+        const root = ju.object(parsed.value) orelse return vol;
 
-        const root = switch (parsed.value) {
-            .object => |o| o,
-            else => return vol,
-        };
-
-        if (root.get("CreatedAt")) |v| vol.created = v.integer;
-        if (root.get("Driver")) |v| vol.driver = try self.allocator.dupe(u8, v.string);
-
-        if (root.get("Labels")) |v| {
-            if (v == .object) {
-                var label_it = v.object.iterator();
-                while (label_it.next()) |entry| {
-                    const key = try self.allocator.dupe(u8, entry.key_ptr.*);
-                    const val = try self.allocator.dupe(u8, entry.value_ptr.*.string);
-                    try vol.labels.put(key, val);
-                }
-            }
-        }
-
-        if (root.get("Options")) |v| {
-            if (v == .object) {
-                var opts_it = v.object.iterator();
-                while (opts_it.next()) |entry| {
-                    const key = try self.allocator.dupe(u8, entry.key_ptr.*);
-                    const val = try self.allocator.dupe(u8, entry.value_ptr.*.string);
-                    try vol.options.put(key, val);
-                }
+        if (ju.str(root.get("CreatedAt"))) |v| vol.created = @intCast(timefmt.parseRfc3339(v) orelse 0);
+        if (ju.int(root.get("CreatedAt"))) |v| vol.created = v;
+        if (ju.str(root.get("Driver"))) |v| vol.driver = try self.allocator.dupe(u8, v);
+        for ([_]struct { []const u8, *std.StringHashMap([]const u8) }{ .{ "Labels", &vol.labels }, .{ "Options", &vol.options } }) |pair| {
+            const obj = ju.object(root.get(pair[0])) orelse continue;
+            var it = obj.iterator();
+            while (it.next()) |e| {
+                const val = ju.str(e.value_ptr.*) orelse continue;
+                try pair[1].put(try self.allocator.dupe(u8, e.key_ptr.*), try self.allocator.dupe(u8, val));
             }
         }
 
@@ -127,39 +107,7 @@ pub const VolumeService = struct {
     pub fn saveVolumeToDisk(self: *VolumeService, vol: *const Volume) !void {
         var path_buf: [512]u8 = undefined;
         const opts_path = try std.fmt.bufPrint(&path_buf, "{s}/volumes/{s}/opts.json", .{ self.config.data_root, vol.name });
-
-        const file = try std.Io.Dir.createFileAbsolute(self.config.io, opts_path, .{});
-        defer file.close(self.config.io);
-
-        var write_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(self.config.io, &write_buf);
-        var writer = &file_writer.interface;
-
-        try writer.writeAll("{");
-        try writer.print("\"CreatedAt\":{d},", .{vol.created});
-        try writer.print("\"Driver\":\"{s}\",", .{vol.driver});
-        
-        try writer.writeAll("\"Labels\":{");
-        var label_it = vol.labels.iterator();
-        var l_idx: usize = 0;
-        while (label_it.next()) |entry| {
-            if (l_idx > 0) try writer.writeByte(',');
-            try writer.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
-            l_idx += 1;
-        }
-        try writer.writeAll("},");
-
-        try writer.writeAll("\"Options\":{");
-        var opts_it = vol.options.iterator();
-        var o_idx: usize = 0;
-        while (opts_it.next()) |entry| {
-            if (o_idx > 0) try writer.writeByte(',');
-            try writer.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
-            o_idx += 1;
-        }
-        try writer.writeAll("}");
-
-        try writer.writeAll("}");
+        try fsutil.writeJsonAtomic(self.config.io, self.allocator, opts_path, vol.*);
     }
 
     pub fn createVolume(self: *VolumeService, name: []const u8, driver: ?[]const u8, labels: ?std.StringHashMap([]const u8), options: ?std.StringHashMap([]const u8)) !*Volume {
@@ -187,7 +135,7 @@ pub const VolumeService = struct {
         vol.driver = try self.allocator.dupe(u8, driver orelse "local");
         vol.mountpoint = try self.allocator.dupe(u8, data_dir);
 
-        const now = std.Io.Clock.now(.awake, self.config.io).toNanoseconds();
+        const now = std.Io.Clock.now(.real, self.config.io).toNanoseconds();
         vol.created = @intCast(now);
         vol.labels = std.StringHashMap([]const u8).init(self.allocator);
         vol.options = std.StringHashMap([]const u8).init(self.allocator);

@@ -13,12 +13,14 @@ pub const IPAM = struct {
     pub fn init(allocator: std.mem.Allocator, subnet: []const u8, gateway: []const u8) !IPAM {
         const slash = std.mem.indexOf(u8, subnet, "/") orelse return error.InvalidParameter;
         const ip_str = subnet[0..slash];
-        const prefix_len = try std.fmt.parseInt(u6, subnet[slash + 1 ..], 10);
+        const prefix_len = std.fmt.parseInt(u6, subnet[slash + 1 ..], 10) catch return error.InvalidParameter;
+        if (prefix_len > 30 or prefix_len < 8) return error.InvalidParameter;
         const host_bits: u6 = 32 - prefix_len;
         const host_count: u32 = @as(u32, 1) << @as(u5, @intCast(host_bits));
 
         const bitmap_bytes = (host_count + 7) / 8;
         const bitmap = try allocator.alloc(u8, bitmap_bytes);
+        errdefer allocator.free(bitmap);
         @memset(bitmap, 0);
 
         const base = parseIPv4(ip_str) orelse return error.InvalidParameter;
@@ -37,7 +39,9 @@ pub const IPAM = struct {
         self.markUsed(0);
         self.markUsed(host_count - 1);
 
-        const gw_host = parseIPv4(gateway) orelse return error.InvalidParameter;
+        // Default gateway is the first host address, as in Docker.
+        const gw_host = if (gateway.len == 0) base + 1 else parseIPv4(gateway) orelse return error.InvalidParameter;
+        if (gw_host <= base or gw_host - base >= host_count) return error.InvalidParameter;
         self.markUsed(gw_host - base);
 
         return self;
