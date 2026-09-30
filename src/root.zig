@@ -27,6 +27,8 @@ test {
     _ = @import("daemon/wait.zig");
     _ = @import("errdefs/errors.zig");
     _ = @import("events/events.zig");
+    _ = @import("image/content.zig");
+    _ = @import("image/manifest.zig");
     _ = @import("image/overlay.zig");
     _ = @import("image/reference.zig");
     _ = @import("image/tarx.zig");
