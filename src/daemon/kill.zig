@@ -4,6 +4,7 @@ const runc = @import("../runtime/runc.zig");
 
 pub fn containerKill(daemon: *Daemon, name: []const u8, signal_opt: ?[]const u8) !void {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;

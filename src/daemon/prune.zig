@@ -1,6 +1,7 @@
 const std = @import("std");
 const Daemon = @import("daemon.zig").Daemon;
 const remove_mod = @import("remove.zig");
+const ContainerStore = @import("../container/store.zig").ContainerStore;
 
 pub const PruneReport = struct {
     containers_deleted: [][]const u8,
@@ -18,7 +19,7 @@ pub const PruneReport = struct {
 
 pub fn containerPrune(daemon: *Daemon, allocator: std.mem.Allocator) !PruneReport {
     const list = try daemon.containers.list(allocator);
-    defer allocator.free(list);
+    defer ContainerStore.releaseList(allocator, list);
 
     var deleted = std.ArrayList([]const u8).empty;
     errdefer {

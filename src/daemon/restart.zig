@@ -5,6 +5,7 @@ const start_mod = @import("start.zig");
 
 pub fn containerRestart(daemon: *Daemon, name: []const u8, timeout_secs: ?u32) !void {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;

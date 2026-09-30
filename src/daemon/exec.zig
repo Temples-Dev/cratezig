@@ -3,6 +3,7 @@ const Daemon = @import("daemon.zig").Daemon;
 const Container = @import("../container/container.zig").Container;
 const ExecProcess = @import("../container/container.zig").ExecProcess;
 const clone = @import("../container/clone.zig");
+const ContainerStore = @import("../container/store.zig").ContainerStore;
 const runc = @import("../runtime/runc.zig");
 const fsutil = @import("../util/fsutil.zig");
 const CrateError = @import("../errdefs/errors.zig").Error;
@@ -11,6 +12,7 @@ const CrateError = @import("../errdefs/errors.zig").Error;
 pub fn containerExecCreate(daemon: *Daemon, container_name: []const u8, cmd: []const []const u8, privileged: bool, tty: bool, allocator: std.mem.Allocator) ![]const u8 {
     if (cmd.len == 0) return CrateError.InvalidParameter;
     const ctr = daemon.containers.get(container_name) orelse return CrateError.ContainerNotFound;
+    defer ctr.release();
 
     var bytes: [32]u8 = undefined;
     try daemon.config.io.randomSecure(&bytes);
@@ -40,15 +42,23 @@ pub fn containerExecCreate(daemon: *Daemon, container_name: []const u8, cmd: []c
     return allocator.dupe(u8, &hex);
 }
 
-const Found = struct { ctr: *Container, ep: *ExecProcess };
+/// A retained container plus one of its exec sessions. Call `deinit`.
+const Found = struct {
+    ctr: *Container,
+    ep: *ExecProcess,
+
+    fn deinit(self: Found) void {
+        self.ctr.release();
+    }
+};
 
 fn find(daemon: *Daemon, exec_id: []const u8) !Found {
     const list = try daemon.containers.list(daemon.allocator);
-    defer daemon.allocator.free(list);
+    defer ContainerStore.releaseList(daemon.allocator, list);
     for (list) |ctr| {
         ctr.lock();
         defer ctr.unlock();
-        if (ctr.exec_commands.get(exec_id)) |ep| return .{ .ctr = ctr, .ep = ep };
+        if (ctr.exec_commands.get(exec_id)) |ep| return .{ .ctr = ctr.retain(), .ep = ep };
     }
     return CrateError.ExecNotFound;
 }
@@ -57,6 +67,7 @@ fn find(daemon: *Daemon, exec_id: []const u8) !Found {
 /// (Phase 1/3); the exit code is recorded for exec inspect.
 pub fn containerExecStart(daemon: *Daemon, exec_id: []const u8) !void {
     const f = try find(daemon, exec_id);
+    defer f.deinit();
     const io = daemon.config.io;
 
     var spec_path_buf: [512]u8 = undefined;
@@ -87,7 +98,9 @@ pub fn containerExecStart(daemon: *Daemon, exec_id: []const u8) !void {
     f.ep.running = true;
     f.ctr.unlock();
 
-    const thread = std.Thread.spawn(.{}, reap, .{ daemon, f, child }) catch |err| {
+    const owned: Found = .{ .ctr = f.ctr.retain(), .ep = f.ep };
+    const thread = std.Thread.spawn(.{}, reap, .{ daemon, owned, child }) catch |err| {
+        owned.deinit();
         child.kill(io);
         return err;
     };
@@ -97,7 +110,9 @@ pub fn containerExecStart(daemon: *Daemon, exec_id: []const u8) !void {
     daemon.events.publish(.{ .event_type = .container, .action = "exec_start", .actor_id = f.ctr.id[0..], .time_nano = now });
 }
 
+/// Takes ownership of `f`'s reference.
 fn reap(daemon: *Daemon, f: Found, child: std.process.Child) void {
+    defer f.deinit();
     var c = child;
     const term = c.wait(daemon.config.io) catch null;
     f.ctr.lock();
@@ -110,6 +125,21 @@ fn reap(daemon: *Daemon, f: Found, child: std.process.Child) void {
     } else 255;
 }
 
-pub fn containerExecInspect(daemon: *Daemon, exec_id: []const u8) !*ExecProcess {
-    return (try find(daemon, exec_id)).ep;
+pub const ExecInfo = struct {
+    id: [64]u8,
+    container_id: [64]u8,
+    running: bool,
+    exit_code: i32,
+    pid: u32,
+};
+
+/// Snapshot of an exec session, safe to use after the container is gone.
+pub fn containerExecInspect(daemon: *Daemon, exec_id: []const u8) !ExecInfo {
+    const f = try find(daemon, exec_id);
+    defer f.deinit();
+    f.ctr.lock();
+    defer f.ctr.unlock();
+    var info: ExecInfo = .{ .id = @splat(0), .container_id = f.ctr.id, .running = f.ep.running, .exit_code = f.ep.exit_code, .pid = f.ep.pid };
+    @memcpy(info.id[0..@min(64, f.ep.id.len)], f.ep.id[0..@min(64, f.ep.id.len)]);
+    return info;
 }

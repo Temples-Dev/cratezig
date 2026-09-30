@@ -90,6 +90,8 @@ pub fn connect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
 
     const ctr = daemon.containers.get(container_id) orelse return Response.notFound("container not found");
 
+    defer ctr.release();
+
     ctr.lock();
     const pid = ctr.state.pid;
     const is_running = ctr.state.running;
@@ -132,6 +134,8 @@ pub fn disconnect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Resp
     const container_id = if (root.get("Container")) |v| v.string else return Response.badRequest("missing Container");
 
     const ctr = daemon.containers.get(container_id) orelse return Response.notFound("container not found");
+
+    defer ctr.release();
 
     const net = daemon.network.get(net_id) orelse return Response.notFound("network not found");
 

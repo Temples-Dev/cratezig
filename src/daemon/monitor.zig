@@ -42,7 +42,9 @@ fn pollUntilStopped(daemon: *Daemon, ctr: *Container) i32 {
     }
 }
 
+/// Takes ownership of one reference to `ctr`.
 pub fn watchContainer(daemon: *Daemon, ctr: *Container, pid: u32) void {
+    defer ctr.release();
     const io = daemon.config.io;
     const exit_code = waitExit(daemon, ctr, pid);
     runc.delete(io, ctr.id[0..], daemon.allocator, true) catch {};

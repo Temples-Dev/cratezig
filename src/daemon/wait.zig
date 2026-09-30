@@ -3,6 +3,7 @@ const Daemon = @import("daemon.zig").Daemon;
 
 pub fn containerWait(daemon: *Daemon, name: []const u8) !i32 {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     while (true) {
         ctr.lock();

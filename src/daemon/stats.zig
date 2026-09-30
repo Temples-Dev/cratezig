@@ -61,6 +61,7 @@ pub const ContainerStats = struct {
 
 pub fn containerStats(daemon: *Daemon, name: []const u8, allocator: std.mem.Allocator) !ContainerStats {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;

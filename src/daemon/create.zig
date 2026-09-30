@@ -33,7 +33,7 @@ pub fn containerCreate(daemon: *Daemon, params: CreateConfig) !CreateResponse {
 
     var name_buf: [64]u8 = undefined;
     const name = if (params.name) |n| try normalizeName(n) else try generateRandomName(daemon.config.io, &name_buf);
-    if (daemon.containers.get(name) != null) return CrateError.ContainerNameInUse;
+    if (daemon.containers.contains(name)) return CrateError.ContainerNameInUse;
 
     const ctr = try Container.create(daemon.allocator, daemon.config.io);
     errdefer ctr.destroy(daemon.allocator);

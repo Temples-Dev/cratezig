@@ -5,6 +5,7 @@ const CrateError = @import("../errdefs/errors.zig").Error;
 
 pub fn containerStop(daemon: *Daemon, name: []const u8, timeout_secs: ?u32) !void {
     const ctr = daemon.containers.get(name) orelse return CrateError.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     // Explicit stop always wins over the restart policy, even mid-backoff.

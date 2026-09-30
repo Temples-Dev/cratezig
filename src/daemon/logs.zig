@@ -5,6 +5,7 @@ const outputLogPath = @import("start.zig").outputLogPath;
 /// Returns the container's captured stdout/stderr (at most the last 10 MiB).
 pub fn containerLogs(daemon: *Daemon, name: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     var path_buf: [512]u8 = undefined;
     const log_path = try outputLogPath(daemon, ctr, &path_buf);

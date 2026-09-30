@@ -18,6 +18,7 @@ pub fn usesBridge(mode: []const u8) bool {
 
 pub fn containerStart(daemon: *Daemon, name: []const u8) !void {
     const ctr = daemon.containers.get(name) orelse return CrateError.ContainerNotFound;
+    defer ctr.release();
 
     // Hold the lock for the whole transition so concurrent starts cannot race.
     ctr.lock();
@@ -63,7 +64,11 @@ pub fn containerStart(daemon: *Daemon, name: []const u8) !void {
     ctr.state = .{ .status = .running, .running = true, .pid = pid, .started_at = @intCast(now), .exit_code = 0 };
     try ctr.persistState(&daemon.config);
 
-    const thread = try std.Thread.spawn(.{}, monitor.watchContainer, .{ daemon, ctr, pid });
+    // The monitor owns a reference until the container exits.
+    const thread = std.Thread.spawn(.{}, monitor.watchContainer, .{ daemon, ctr.retain(), pid }) catch |err| {
+        ctr.release();
+        return err;
+    };
     thread.detach();
 
     daemon.events.publish(.{ .event_type = .container, .action = "start", .actor_id = id, .time_nano = now });

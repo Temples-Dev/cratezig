@@ -5,6 +5,7 @@ const CrateError = @import("../errdefs/errors.zig").Error;
 pub fn containerRemove(daemon: *Daemon, name: []const u8, force: bool, remove_vols: bool) !void {
     _ = remove_vols;
     const ctr = daemon.containers.get(name) orelse return CrateError.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;
@@ -36,9 +37,7 @@ pub fn containerRemove(daemon: *Daemon, name: []const u8, force: bool, remove_vo
     const overlay_dir = try std.fmt.bufPrint(&overlay_buf, "{s}/overlay2/{s}", .{ daemon.config.data_root, ctr.rw_layer_id });
     std.Io.Dir.cwd().deleteTree(daemon.config.io, overlay_dir) catch {};
 
-    // 3. Delete from store. The Container itself is intentionally not freed
-    // yet: other handlers may still hold the pointer. Refcounted handles
-    // (Phase 1) will let us destroy it here.
+    // 3. Unregister. Memory is freed once the last holder releases it.
     daemon.containers.delete(ctr.id[0..]);
 
     // 4. Publish event

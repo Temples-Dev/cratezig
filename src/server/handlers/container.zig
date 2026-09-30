@@ -8,6 +8,7 @@ const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
 const stream = @import("../stream.zig");
 const view = @import("container_view.zig");
+const ContainerStore = @import("../../container/store.zig").ContainerStore;
 
 // POST /containers/{name}/start
 pub fn start(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
@@ -60,6 +61,7 @@ pub fn list(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const all = req.queryBool("all");
 
     const containers = daemon.containers.list(alloc) catch return Response.internalError("list failed");
+    defer ContainerStore.releaseList(alloc, containers);
     const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
 
     var result = std.ArrayList(view.Summary).empty;
@@ -82,6 +84,7 @@ pub fn list(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
 pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const name = req.params.get("name") orelse return Response.badRequest("missing name");
     const ctr = daemon.containers.get(name) orelse return Response.notFound("container not found");
+    defer ctr.release();
 
     const json = std.json.Stringify.valueAlloc(alloc, ctr, .{}) catch "{}";
     return Response.ok(json);
@@ -147,6 +150,7 @@ pub fn wait(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
 pub fn logs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     const name = req.params.get("name") orelse return Response.badRequest("missing name");
     const ctr = daemon.containers.get(name) orelse return Response.notFound("container not found");
+    defer ctr.release();
     const content = daemon.containerLogs(name, alloc) catch |err| {
         return Response.fromError(err);
     };

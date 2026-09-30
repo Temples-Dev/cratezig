@@ -29,6 +29,11 @@ pub const Container = struct {
     /// Consecutive policy restarts; drives exponential backoff.
     restart_count: u32 = 0,
 
+    /// One reference is held by the store while the container is registered;
+    /// every `ContainerStore.get`/`list` result and background thread holds
+    /// another. The last `release` frees the container.
+    refs: std.atomic.Value(u32) = .init(1),
+
     id: [64]u8,
     id_short: [12]u8,
     name: []const u8,
@@ -117,7 +122,17 @@ pub const Container = struct {
         return self.arena.allocator();
     }
 
-    /// Frees the container and everything it owns.
+    pub fn retain(self: *Container) *Container {
+        _ = self.refs.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    pub fn release(self: *Container) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) self.destroy(self.arena.child_allocator);
+    }
+
+    /// Frees the container and everything it owns. Only for containers that
+    /// were never shared; otherwise use `release`.
     pub fn destroy(self: *Container, gpa: std.mem.Allocator) void {
         self.arena.deinit();
         gpa.destroy(self);

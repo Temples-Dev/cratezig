@@ -4,6 +4,7 @@ const runc = @import("../runtime/runc.zig");
 
 pub fn containerPause(daemon: *Daemon, name: []const u8) !void {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;
@@ -32,6 +33,7 @@ pub fn containerPause(daemon: *Daemon, name: []const u8) !void {
 
 pub fn containerUnpause(daemon: *Daemon, name: []const u8) !void {
     const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
+    defer ctr.release();
 
     ctr.lock();
     const is_running = ctr.state.running;

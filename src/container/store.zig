@@ -32,7 +32,7 @@ pub const ContainerStore = struct {
 
     pub fn deinit(self: *ContainerStore) void {
         var it = self.by_id.valueIterator();
-        while (it.next()) |ctr| ctr.*.destroy(self.allocator);
+        while (it.next()) |ctr| ctr.*.release();
         self.sorted_ids.deinit(self.allocator);
         self.by_id.deinit();
         self.by_name.deinit();
@@ -54,10 +54,22 @@ pub const ContainerStore = struct {
         try self.sorted_ids.insert(self.allocator, idx, id);
     }
 
+    /// Looks up by full id, name, or unique id prefix. The result is retained;
+    /// the caller must `release()` it.
     pub fn get(self: *ContainerStore, id_or_prefix: []const u8) ?*Container {
         self.lock.lockSharedUncancelable(self.io);
         defer self.lock.unlockShared(self.io);
+        const ctr = self.find(id_or_prefix) orelse return null;
+        return ctr.retain();
+    }
 
+    pub fn contains(self: *ContainerStore, id_or_prefix: []const u8) bool {
+        self.lock.lockSharedUncancelable(self.io);
+        defer self.lock.unlockShared(self.io);
+        return self.find(id_or_prefix) != null;
+    }
+
+    fn find(self: *ContainerStore, id_or_prefix: []const u8) ?*Container {
         if (self.by_id.get(id_or_prefix)) |ctr| return ctr;
         if (self.by_name.get(id_or_prefix)) |id| return self.by_id.get(id);
 
@@ -84,11 +96,12 @@ pub const ContainerStore = struct {
         return null;
     }
 
+    /// Unregisters the container and drops the store's reference.
     pub fn delete(self: *ContainerStore, id: []const u8) void {
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        if (self.by_id.fetchRemove(id)) |entry| {
+        const removed = blk: {
+            self.lock.lockUncancelable(self.io);
+            defer self.lock.unlock(self.io);
+            const entry = self.by_id.fetchRemove(id) orelse break :blk null;
             _ = self.by_name.remove(entry.value.name);
             for (self.sorted_ids.items, 0..) |s_id, idx| {
                 if (std.mem.eql(u8, s_id, id)) {
@@ -96,7 +109,9 @@ pub const ContainerStore = struct {
                     break;
                 }
             }
-        }
+            break :blk entry.value;
+        };
+        if (removed) |ctr| ctr.release();
     }
 
     pub fn list(self: *ContainerStore, allocator: std.mem.Allocator) ![]*Container {
@@ -106,8 +121,14 @@ pub const ContainerStore = struct {
         var result = try std.ArrayList(*Container).initCapacity(allocator, self.by_id.count());
 
         var it = self.by_id.valueIterator();
-        while (it.next()) |ctr| result.appendAssumeCapacity(ctr.*);
+        while (it.next()) |ctr| result.appendAssumeCapacity(ctr.*.retain());
         return try result.toOwnedSlice(allocator);
+    }
+
+    /// Releases every container returned by `list` and frees the slice.
+    pub fn releaseList(allocator: std.mem.Allocator, items: []*Container) void {
+        for (items) |ctr| ctr.release();
+        allocator.free(items);
     }
 
     pub fn loadFromDisk(self: *ContainerStore, data_root: []const u8, allocator: std.mem.Allocator) !void {
@@ -392,4 +413,22 @@ test "container persistence roundtrip" {
     try testing.expectEqualStrings(id_str[0..12], loaded.id_short[0..12]);
     try testing.expectEqual(123456789, loaded.created_at);
     try testing.expectEqualStrings("alpine:latest", loaded.config.image);
+}
+
+test "container outlives store deletion while a caller holds it" {
+    const alloc = std.testing.allocator;
+    var store = ContainerStore.init(alloc, std.testing.io);
+    defer store.deinit();
+
+    const ctr = try Container.create(alloc, std.testing.io);
+    ctr.id = @splat('a');
+    ctr.name = try ctr.allocator().dupe(u8, "web");
+    try store.add(ctr);
+
+    const held = store.get("web").?;
+    store.delete(held.id[0..]);
+    try std.testing.expect(store.get("web") == null);
+    // Still valid: the store dropped its ref, ours keeps it alive.
+    try std.testing.expectEqualStrings("web", held.name);
+    held.release(); // frees; the testing allocator flags any leak
 }
