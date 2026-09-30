@@ -58,6 +58,8 @@ pub fn watchContainer(daemon: *Daemon, ctr: *Container, pid: u32) void {
     ctr.state.exit_code = exit_code;
     ctr.state.finished_at = @intCast(now);
     ctr.state.status = .exited;
+    ctr.exit_seq += 1;
+    ctr.signalChange();
     ctr.persistState(&daemon.config) catch |err| {
         std.log.err("failed to persist state for {s}: {}", .{ ctr.id[0..12], err });
     };

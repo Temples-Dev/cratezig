@@ -50,6 +50,11 @@ pub const Container = struct {
 
     mutex: std.Io.Mutex = .init,
     state: ContainerState = .{},
+    /// Signalled (with `mutex`) on every exit and on removal.
+    changed: std.Io.Condition = .init,
+    /// Incremented on every exit; lets waiters detect "next exit".
+    exit_seq: u64 = 0,
+    removed: bool = false,
 
     network_settings: NetworkSettings,
 
@@ -144,6 +149,16 @@ pub const Container = struct {
 
     pub fn unlock(self: *Container) void {
         self.mutex.unlock(self.io);
+    }
+
+    /// Blocks until `changed` is signalled. Caller holds the lock.
+    pub fn waitChange(self: *Container) void {
+        self.changed.waitUncancelable(self.io, &self.mutex);
+    }
+
+    /// Caller holds the lock.
+    pub fn signalChange(self: *Container) void {
+        self.changed.broadcast(self.io);
     }
 
     pub fn isRunning(self: *Container) bool {

@@ -36,7 +36,7 @@ fn FixedStr(comptime cap: usize) type {
             return out;
         }
 
-        fn slice(self: *const @This()) []const u8 {
+        pub fn slice(self: *const @This()) []const u8 {
             return self.buf[0..self.len];
         }
     };
@@ -68,6 +68,13 @@ pub const StoredEvent = struct {
             out.attr_len += 1;
         }
         return out;
+    }
+
+    pub fn attr(self: *const StoredEvent, key: []const u8) ?[]const u8 {
+        for (0..self.attr_len) |i| {
+            if (std.mem.eql(u8, self.attr_keys[i].slice(), key)) return self.attr_vals[i].slice();
+        }
+        return null;
     }
 
     pub fn jsonStringify(self: StoredEvent, jws: anytype) !void {
@@ -148,7 +155,7 @@ pub const Subscriber = struct {
         defer self.mutex.unlock(self.io);
 
         while (self.queue.isEmpty() and !self.closed) {
-            self.cond.wait(self.io, &self.mutex);
+            self.cond.waitUncancelable(self.io, &self.mutex);
         }
 
         return self.queue.pop();

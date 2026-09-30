@@ -39,6 +39,10 @@ pub fn containerRemove(daemon: *Daemon, name: []const u8, force: bool, remove_vo
 
     // 3. Unregister. Memory is freed once the last holder releases it.
     daemon.containers.delete(ctr.id[0..]);
+    ctr.lock();
+    ctr.removed = true;
+    ctr.signalChange();
+    ctr.unlock();
 
     // 4. Publish event
     const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();

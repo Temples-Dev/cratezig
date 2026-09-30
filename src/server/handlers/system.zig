@@ -100,13 +100,6 @@ pub fn info(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     return handleInfo(req.*, alloc) catch Response.internalError("info failed");
 }
 
-pub fn events(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = daemon;
-    _ = req;
-    _ = alloc;
-    return Response.ok("{}");
-}
-
 pub fn diskUsage(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     _ = daemon;
     _ = req;

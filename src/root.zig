@@ -41,6 +41,7 @@ test {
     _ = @import("server/handlers/container.zig");
     _ = @import("server/handlers/container_create.zig");
     _ = @import("server/handlers/container_view.zig");
+    _ = @import("server/handlers/events.zig");
     _ = @import("server/handlers/images.zig");
     _ = @import("server/handlers/networks.zig");
     _ = @import("server/handlers/system.zig");

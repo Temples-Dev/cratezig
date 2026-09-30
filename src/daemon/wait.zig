@@ -1,20 +1,32 @@
 const std = @import("std");
-const Daemon = @import("daemon.zig").Daemon;
+const Container = @import("../container/container.zig").Container;
 
-pub fn containerWait(daemon: *Daemon, name: []const u8) !i32 {
-    const ctr = daemon.containers.get(name) orelse return error.ContainerNotFound;
-    defer ctr.release();
+pub const Condition = enum {
+    not_running,
+    next_exit,
+    removed,
 
+    pub fn parse(s: ?[]const u8) !Condition {
+        const v = s orelse return .not_running;
+        if (v.len == 0 or std.mem.eql(u8, v, "not-running")) return .not_running;
+        if (std.mem.eql(u8, v, "next-exit")) return .next_exit;
+        if (std.mem.eql(u8, v, "removed")) return .removed;
+        return error.InvalidParameter;
+    }
+};
+
+/// Blocks until `cond` holds and returns the container's exit code.
+pub fn containerWait(ctr: *Container, cond: Condition) i32 {
+    ctr.lock();
+    defer ctr.unlock();
+    const start_seq = ctr.exit_seq;
     while (true) {
-        ctr.lock();
-        const is_running = ctr.state.running;
-        const exit_code = ctr.state.exit_code;
-        ctr.unlock();
-
-        if (!is_running) {
-            return exit_code;
-        }
-
-        std.Io.sleep(daemon.config.io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
+        const done = switch (cond) {
+            .not_running => !ctr.state.running or ctr.removed,
+            .next_exit => ctr.exit_seq != start_seq or ctr.removed,
+            .removed => ctr.removed,
+        };
+        if (done) return ctr.state.exit_code;
+        ctr.waitChange();
     }
 }

@@ -8,6 +8,8 @@ const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
 const stream = @import("../stream.zig");
 const view = @import("container_view.zig");
+const wait_mod = @import("../../daemon/wait.zig");
+const Conn = @import("../response.zig").Conn;
 const ContainerStore = @import("../../container/store.zig").ContainerStore;
 
 // POST /containers/{name}/start
@@ -134,17 +136,34 @@ pub fn unpause(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
     return Response.noContent();
 }
 
+const WaitCtx = struct {
+    ctr: *Container,
+    cond: wait_mod.Condition,
+
+    fn run(p: *anyopaque, conn: Conn) anyerror!void {
+        const self: *WaitCtx = @ptrCast(@alignCast(p));
+        const code = wait_mod.containerWait(self.ctr, self.cond);
+        try conn.writer.print("{{\"StatusCode\":{d},\"Error\":null}}\n", .{code});
+    }
+
+    fn cleanup(p: *anyopaque) void {
+        const self: *WaitCtx = @ptrCast(@alignCast(p));
+        self.ctr.release();
+    }
+};
+
+/// POST /containers/{name}/wait. Headers are flushed before blocking so
+/// `docker run` knows the wait is registered before it starts the container.
 pub fn wait(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
-    _ = alloc;
     const name = req.params.get("name") orelse return Response.badRequest("missing name");
-
-    const code = daemon.containerWait(name) catch |err| {
-        return Response.fromError(err);
+    const cond = wait_mod.Condition.parse(req.query.get("condition")) catch return Response.badRequest("invalid condition");
+    const ctr = daemon.containers.get(name) orelse return Response.notFound("container not found");
+    const ctx = alloc.create(WaitCtx) catch {
+        ctr.release();
+        return Response.internalError("out of memory");
     };
-
-    var buf: [128]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf, "{{\"StatusCode\":{d}}}", .{code}) catch "{}";
-    return Response.ok(json);
+    ctx.* = .{ .ctr = ctr, .cond = cond };
+    return Response.streaming("application/json", .{ .ctx = ctx, .run = WaitCtx.run, .cleanup = WaitCtx.cleanup });
 }
 
 pub fn logs(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
