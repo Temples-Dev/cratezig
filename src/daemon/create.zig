@@ -53,7 +53,7 @@ pub fn containerCreate(daemon: *Daemon, params: CreateConfig) !CreateResponse {
     ctr.image_name = try a.dupe(u8, params.config.image);
     ctr.rw_layer_id = try a.dupe(u8, &id);
 
-    try daemon.images.createWritableLayer(&id, image.id);
+    try daemon.images.createWritableLayer(&id, image);
     try ctr.persistState(&daemon.config);
     try daemon.containers.add(ctr);
 

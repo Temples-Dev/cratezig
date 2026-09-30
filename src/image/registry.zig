@@ -72,42 +72,56 @@ pub const Client = struct {
         });
     }
 
-    /// GET with one authentication retry. `sink` receives `head()` then `chunk()`s.
-    fn get(self: *Client, target: []const u8, accept: ?[]const u8, sink: anytype) !void {
-        var attempt: u8 = 0;
-        while (true) : (attempt += 1) {
+    /// GET with one authentication retry and manual redirects. `sink`
+    /// receives `head()` then `chunk()`s.
+    fn get(self: *Client, first_target: []const u8, accept: ?[]const u8, sink: anytype) !void {
+        var target_buf: [8 * 1024]u8 = undefined;
+        var target: []const u8 = first_target;
+        var retried_auth = false;
+        var send_auth = true;
+        var redirects: u8 = 0;
+        while (true) {
             var extra_buf: [1]http.Header = undefined;
             const extra: []const http.Header = if (accept) |acc| blk: {
                 extra_buf[0] = .{ .name = "Accept", .value = acc };
                 break :blk extra_buf[0..1];
             } else &.{};
-            var priv_buf: [1]http.Header = undefined;
-            const priv: []const http.Header = if (self.auth) |a| blk: {
-                // Privileged: dropped when Docker Hub redirects blobs to its CDN.
-                priv_buf[0] = .{ .name = "Authorization", .value = a };
-                break :blk priv_buf[0..1];
-            } else &.{};
+            const auth: http.Client.Request.Headers.Value = if (send_auth and self.auth != null) .{ .override = self.auth.? } else .omit;
 
             var req = try self.http.request(.GET, try std.Uri.parse(target), .{
                 .extra_headers = extra,
-                .privileged_headers = priv,
-                .headers = .{ .accept_encoding = .{ .override = "identity" } },
+                .redirect_behavior = .unhandled,
+                .headers = .{ .accept_encoding = .{ .override = "identity" }, .authorization = auth },
             });
             defer req.deinit();
             try req.sendBodiless();
-            var redirect_buf: [16 * 1024]u8 = undefined;
-            var res = try req.receiveHead(&redirect_buf);
+            var res = try req.receiveHead(&.{});
 
-            if (res.head.status == .unauthorized and attempt == 0) {
-                const challenge = header(res.head, "www-authenticate") orelse return error.RegistryUnauthorized;
-                const owned = try self.gpa.dupe(u8, challenge);
-                defer self.gpa.free(owned);
-                try self.authenticate(owned);
-                continue;
-            }
             switch (res.head.status) {
+                .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
+                    redirects += 1;
+                    if (redirects > 5) return error.RegistryError;
+                    const loc = res.head.location orelse return error.RegistryError;
+                    if (loc.len > target_buf.len) return error.RegistryError;
+                    // Docker Hub sends blobs to a CDN: never forward the
+                    // registry token to another host.
+                    const old_host = hostOf(target);
+                    @memmove(target_buf[0..loc.len], loc);
+                    target = target_buf[0..loc.len];
+                    if (!std.mem.eql(u8, hostOf(target), old_host)) send_auth = false;
+                    continue;
+                },
+                .unauthorized => {
+                    if (retried_auth or !send_auth) return error.RegistryUnauthorized;
+                    retried_auth = true;
+                    const challenge = header(res.head, "www-authenticate") orelse return error.RegistryUnauthorized;
+                    const owned = try self.gpa.dupe(u8, challenge);
+                    defer self.gpa.free(owned);
+                    try self.authenticate(owned);
+                    continue;
+                },
                 .ok => {},
-                .unauthorized, .forbidden => return error.RegistryUnauthorized,
+                .forbidden => return error.RegistryUnauthorized,
                 .not_found => return error.ManifestNotFound,
                 else => {
                     std.log.err("registry GET {s}: HTTP {d}", .{ target, @intFromEnum(res.head.status) });
@@ -188,6 +202,12 @@ fn basic(gpa: std.mem.Allocator, c: Credentials) ![]u8 {
     return out;
 }
 
+fn hostOf(url_str: []const u8) []const u8 {
+    const start = (std.mem.indexOf(u8, url_str, "://") orelse return "") + 3;
+    const end = std.mem.indexOfAnyPos(u8, url_str, start, "/?#") orelse url_str.len;
+    return url_str[start..end];
+}
+
 fn header(head: http.Client.Response.Head, name: []const u8) ?[]const u8 {
     var it = head.iterateHeaders();
     while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -255,6 +275,7 @@ test "auth challenge parsing" {
     try std.testing.expectEqualStrings("registry.docker.io", param(c, "service").?);
     try std.testing.expectEqualStrings("repository:library/alpine:pull", param(c, "scope").?);
     try std.testing.expectEqual(null, param(c, "missing"));
+    try std.testing.expectEqualStrings("cdn.example:443", hostOf("https://cdn.example:443/x?y"));
 
     const b = try basic(std.testing.allocator, .{ .username = "u", .password = "p" });
     defer std.testing.allocator.free(b);

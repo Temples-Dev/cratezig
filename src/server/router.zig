@@ -12,6 +12,7 @@ const vh = @import("handlers/volumes.zig");
 const sh = @import("handlers/system.zig");
 const bh = @import("handlers/builder_handler.zig");
 const eh = @import("handlers/events.zig");
+const pullh = @import("handlers/image_pull.zig");
 
 const Handler = *const fn (daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response;
 
@@ -51,7 +52,7 @@ const ROUTES = [_]Route{
 
     // ── Images ──────────────────────────────────────────────────────────────
     .{ .method = "GET", .pattern = "/images/json", .handler = ih.list },
-    .{ .method = "POST", .pattern = "/images/create", .handler = ih.pull },
+    .{ .method = "POST", .pattern = "/images/create", .handler = pullh.pull },
     .{ .method = "GET", .pattern = "/images/{name}/json", .handler = ih.inspect },
     .{ .method = "DELETE", .pattern = "/images/{name}", .handler = ih.remove },
     .{ .method = "POST", .pattern = "/images/{name}/tag", .handler = ih.tag },

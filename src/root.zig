@@ -31,6 +31,7 @@ test {
     _ = @import("image/layers.zig");
     _ = @import("image/manifest.zig");
     _ = @import("image/overlay.zig");
+    _ = @import("image/pull.zig");
     _ = @import("image/reference.zig");
     _ = @import("image/registry.zig");
     _ = @import("image/tarx.zig");
@@ -49,6 +50,7 @@ test {
     _ = @import("server/handlers/container_create.zig");
     _ = @import("server/handlers/container_view.zig");
     _ = @import("server/handlers/events.zig");
+    _ = @import("server/handlers/image_pull.zig");
     _ = @import("server/handlers/images.zig");
     _ = @import("server/handlers/networks.zig");
     _ = @import("server/handlers/system.zig");

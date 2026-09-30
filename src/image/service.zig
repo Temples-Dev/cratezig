@@ -5,6 +5,8 @@ const CrateError = @import("../errdefs/errors.zig").Error;
 const fsutil = @import("../util/fsutil.zig");
 const ju = @import("../util/jsonutil.zig");
 const overlay = @import("overlay.zig");
+const content = @import("content.zig");
+const layers = @import("layers.zig");
 
 pub const LoadError = error{ InvalidJson, MissingId };
 
@@ -16,6 +18,10 @@ pub const ImageService = struct {
     /// Keyed by "repo:tag"; keys are owned by the image's arena.
     by_tag: std.StringHashMap(*Image),
     lock: std.Io.RwLock = .init,
+    content: content.Store,
+    layers: layers.Store,
+    /// Serializes pulls so two pulls never unpack the same layer at once.
+    pull_mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, config: DaemonConfig) !ImageService {
         var svc = ImageService{
@@ -23,6 +29,8 @@ pub const ImageService = struct {
             .config = config,
             .by_id = .init(allocator),
             .by_tag = .init(allocator),
+            .content = try content.Store.init(config.io, allocator, config.data_root),
+            .layers = .{ .io = config.io, .data_root = config.data_root },
         };
         errdefer svc.deinit();
         try svc.loadFromDisk();
@@ -34,6 +42,7 @@ pub const ImageService = struct {
         while (it.next()) |img| img.*.destroy(self.allocator);
         self.by_id.deinit();
         self.by_tag.deinit();
+        self.content.deinit(self.allocator);
     }
 
     pub fn getImage(self: *ImageService, ref: []const u8) !*Image {
@@ -64,16 +73,73 @@ pub const ImageService = struct {
         return match orelse CrateError.ImageNotFound;
     }
 
-    /// Creates the overlay2 directories for a container's writable layer.
-    /// The `lower` chain is written by the layer store once real image
-    /// layers exist (Phase 2); `image_id` is unused until then.
-    pub fn createWritableLayer(self: *ImageService, id: *const [64]u8, image_id: []const u8) !void {
-        _ = image_id;
+    /// Creates the overlay2 directories for a container's writable layer and
+    /// points its `lower` at the image's top layer.
+    pub fn createWritableLayer(self: *ImageService, id: *const [64]u8, image: *Image) !void {
         for ([_][]const u8{ "diff", "work", "merged" }) |sub| {
             var buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}/overlay2/{s}/{s}", .{ self.config.data_root, id, sub });
             try std.Io.Dir.createDirPath(.cwd(), self.config.io, path);
         }
+        if (image.rootfs.layers.len == 0) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const chain = try layers.chainIds(arena.allocator(), image.rootfs.layers);
+        const top = &chain[chain.len - 1];
+        if (!self.layers.exists(top)) return error.ImageLayersMissing;
+        var lower_buf: [4096]u8 = undefined;
+        var path_buf: [512]u8 = undefined;
+        const lower_path = try std.fmt.bufPrint(&path_buf, "{s}/overlay2/{s}/lower", .{ self.config.data_root, id });
+        try fsutil.writeFileAtomic(self.config.io, lower_path, try self.layers.lowerFor(&lower_buf, top));
+    }
+
+    /// Registers a freshly pulled image, taking ownership of `img`. Tags move
+    /// from any image that held them; an image with the same id is merged.
+    pub fn addImage(self: *ImageService, img: *Image) !*Image {
+        self.lock.lockUncancelable(self.config.io);
+        defer self.lock.unlock(self.config.io);
+
+        const target = self.by_id.get(img.id) orelse blk: {
+            const owned_tags = img.repo_tags;
+            img.repo_tags = &.{};
+            try self.by_id.put(img.id, img);
+            for (owned_tags) |t| try self.moveTag(img, t);
+            break :blk img;
+        };
+        if (target != img) {
+            defer img.destroy(self.allocator);
+            for (img.repo_tags) |t| try self.moveTag(target, t);
+            for (img.repo_digests) |d| try self.addDigest(target, d);
+        }
+        try self.saveImageToDisk(target);
+        return target;
+    }
+
+    /// Points `tag` at `img`, removing it from whichever image had it.
+    /// Caller holds the write lock.
+    fn moveTag(self: *ImageService, img: *Image, tag: []const u8) !void {
+        if (self.by_tag.get(tag)) |prev| {
+            if (prev == img) return;
+            try self.untag(prev, tag);
+        }
+        const a = img.allocator();
+        const owned = try a.dupe(u8, tag);
+        const tags = try a.alloc([]const u8, img.repo_tags.len + 1);
+        @memcpy(tags[0..img.repo_tags.len], img.repo_tags);
+        tags[img.repo_tags.len] = owned;
+        img.repo_tags = tags;
+        try self.by_tag.put(owned, img);
+    }
+
+    fn addDigest(self: *ImageService, img: *Image, digest: []const u8) !void {
+        _ = self;
+        for (img.repo_digests) |d| if (std.mem.eql(u8, d, digest)) return;
+        const a = img.allocator();
+        const digests = try a.alloc([]const u8, img.repo_digests.len + 1);
+        @memcpy(digests[0..img.repo_digests.len], img.repo_digests);
+        digests[img.repo_digests.len] = try a.dupe(u8, digest);
+        img.repo_digests = digests;
     }
 
     pub fn mountWritableLayer(self: *ImageService, id: []const u8) !void {
@@ -132,10 +198,10 @@ pub const ImageService = struct {
     }
 
     fn loadImageFromFile(self: *ImageService, path: []const u8) !*Image {
-        const content = try std.Io.Dir.cwd().readFileAlloc(self.config.io, path, self.allocator, .limited(10 * 1024 * 1024));
-        defer self.allocator.free(content);
+        const raw = try std.Io.Dir.cwd().readFileAlloc(self.config.io, path, self.allocator, .limited(10 * 1024 * 1024));
+        defer self.allocator.free(raw);
 
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{});
         defer parsed.deinit();
         const root = ju.object(parsed.value) orelse return LoadError.InvalidJson;
 
@@ -175,21 +241,7 @@ pub const ImageService = struct {
 
         const img = try self.getImageLocked(name);
         var tag_buf: [512]u8 = undefined;
-        const new_tag = try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ repo, tag_val });
-
-        // Retagging moves the tag, as in Docker.
-        if (self.by_tag.get(new_tag)) |prev| {
-            if (prev == img) return;
-            try self.untag(prev, new_tag);
-        }
-
-        const a = img.allocator();
-        const owned = try a.dupe(u8, new_tag);
-        const tags = try a.alloc([]const u8, img.repo_tags.len + 1);
-        @memcpy(tags[0..img.repo_tags.len], img.repo_tags);
-        tags[img.repo_tags.len] = owned;
-        img.repo_tags = tags;
-        try self.by_tag.put(owned, img);
+        try self.moveTag(img, try std.fmt.bufPrint(&tag_buf, "{s}:{s}", .{ repo, tag_val }));
         try self.saveImageToDisk(img);
     }
 
@@ -210,8 +262,14 @@ pub const ImageService = struct {
 
     /// Untags `name`, deleting the image once no tags remain (or when `name`
     /// is an id). Response strings are allocated with `allocator`.
-    pub fn removeImage(self: *ImageService, allocator: std.mem.Allocator, name: []const u8, force: bool) ![]RemoveResponseItem {
-        _ = force;
+    /// Untags `name`, deleting the image once no tags remain (or when `name`
+    /// is an id). Images whose id is in `in_use` (used by containers) are
+    /// only untagged, and only with `force`. Unreferenced layers are
+    /// garbage-collected. Response strings are allocated with `allocator`.
+    pub fn removeImage(self: *ImageService, allocator: std.mem.Allocator, name: []const u8, force: bool, in_use: []const []const u8) ![]RemoveResponseItem {
+        // Before `lock`, matching pull's order: no layer GC while a pull runs.
+        self.pull_mutex.lockUncancelable(self.config.io);
+        defer self.pull_mutex.unlock(self.config.io);
         self.lock.lockUncancelable(self.config.io);
         defer self.lock.unlock(self.config.io);
 
@@ -220,15 +278,20 @@ pub const ImageService = struct {
 
         var tag_buf: [512]u8 = undefined;
         const tag = try withDefaultTag(name, &tag_buf);
-        if (self.by_tag.get(tag)) |img| {
-            if (img.repo_tags.len > 1) {
-                try response.append(allocator, .{ .untagged = try allocator.dupe(u8, tag) });
-                try self.untag(img, tag);
-                return response.toOwnedSlice(allocator);
-            }
-        }
+        const by_tag = self.by_tag.get(tag);
+        const img = by_tag orelse try self.getImageLocked(name);
+        const used = for (in_use) |id| {
+            if (std.mem.eql(u8, id, img.id)) break true;
+        } else false;
 
-        const img = try self.getImageLocked(name);
+        if (by_tag != null and (img.repo_tags.len > 1 or used)) {
+            if (used and !force) return CrateError.ImageInUse;
+            try response.append(allocator, .{ .untagged = try allocator.dupe(u8, tag) });
+            try self.untag(img, tag);
+            return response.toOwnedSlice(allocator);
+        }
+        if (used) return CrateError.ImageInUse;
+
         for (img.repo_tags) |t| {
             _ = self.by_tag.remove(t);
             try response.append(allocator, .{ .untagged = try allocator.dupe(u8, t) });
@@ -240,19 +303,30 @@ pub const ImageService = struct {
         std.Io.Dir.deleteFileAbsolute(self.config.io, img_path) catch |err| {
             std.log.warn("failed to delete image file {s}: {}", .{ img_path, err });
         };
+        if (self.content.blobPath(img.id, &path_buf)) |blob| {
+            std.Io.Dir.deleteFileAbsolute(self.config.io, blob) catch {};
+        } else |_| {}
         _ = self.by_id.remove(img.id);
-        img.destroy(self.allocator);
+        defer img.destroy(self.allocator);
+        self.collectLayers(img) catch |err| std.log.warn("layer GC failed: {}", .{err});
 
         return response.toOwnedSlice(allocator);
     }
 
-    /// Registry pulls land in Phase 2. Until then this fails loudly instead
-    /// of fabricating an image with no layers.
-    pub fn pullImage(self: *ImageService, from_image: []const u8, tag_val: []const u8) !*Image {
-        _ = self;
-        _ = from_image;
-        _ = tag_val;
-        return error.NotImplemented;
+    /// Deletes `gone`'s layers that no remaining image shares. Caller holds
+    /// both locks.
+    fn collectLayers(self: *ImageService, gone: *Image) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var keep = std.StringHashMap(void).init(a);
+        var it = self.by_id.valueIterator();
+        while (it.next()) |other| {
+            for (try layers.chainIds(a, other.*.rootfs.layers)) |*c| try keep.put(c, {});
+        }
+        for (try layers.chainIds(a, gone.rootfs.layers)) |*c| {
+            if (!keep.contains(c)) self.layers.abort(c);
+        }
     }
 };
 
@@ -321,7 +395,7 @@ test "image metadata round-trips through disk" {
     try std.testing.expect(try svc.getImage("abcdef") == img);
 
     try svc.tagImage("app:1", "app", "2");
-    const removed = try svc.removeImage(gpa, "app:1", false);
+    const removed = try svc.removeImage(gpa, "app:1", false, &.{});
     defer {
         for (removed) |r| if (r.untagged) |u| gpa.free(u);
         gpa.free(removed);

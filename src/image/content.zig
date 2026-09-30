@@ -71,12 +71,12 @@ pub const Store = struct {
 
     pub fn ingest(self: *const Store, digest: []const u8, size: ?u64) !Ingest {
         if (!reference.validDigest(digest)) return error.InvalidDigest;
-        var w: Ingest = .{ .store = self, .expected = undefined, .expected_size = size, .file = undefined, .tmp_path = undefined };
+        var w: Ingest = .{ .store = self, .expected = undefined, .expected_size = size, .file = undefined };
         @memcpy(&w.expected, digest[0 .. 7 + 64]);
         var rand: [8]u8 = undefined;
         try self.io.randomSecure(&rand);
         const tmp = try std.fmt.bufPrint(&w.tmp_buf, "{s}/ingest/{s}-{x}", .{ self.root, hex(digest), rand });
-        w.tmp_path = tmp;
+        w.tmp_len = tmp.len;
         w.file = try std.Io.Dir.createFileAbsolute(self.io, tmp, .{ .exclusive = true });
         return w;
     }
@@ -88,8 +88,10 @@ pub const Ingest = struct {
     expected: [7 + 64]u8,
     expected_size: ?u64,
     file: std.Io.File,
+    // Stored as buffer + length (not a slice): Ingest is returned by value,
+    // so a slice into its own buffer would dangle after the copy.
     tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
-    tmp_path: []const u8,
+    tmp_len: usize = 0,
     hasher: Sha256 = .init(.{}),
     written: u64 = 0,
     done: bool = false,
@@ -110,14 +112,18 @@ pub const Ingest = struct {
         self.file.close(self.store.io);
         self.done = true;
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        try std.Io.Dir.rename(.cwd(), self.tmp_path, .cwd(), try self.store.blobPath(&self.expected, &buf), self.store.io);
+        try std.Io.Dir.rename(.cwd(), self.tmpPath(), .cwd(), try self.store.blobPath(&self.expected, &buf), self.store.io);
     }
 
     pub fn abort(self: *Ingest) void {
         if (self.done) return;
         self.done = true;
         self.file.close(self.store.io);
-        std.Io.Dir.deleteFileAbsolute(self.store.io, self.tmp_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(self.store.io, self.tmpPath()) catch {};
+    }
+
+    fn tmpPath(self: *const Ingest) []const u8 {
+        return self.tmp_buf[0..self.tmp_len];
     }
 };
 
