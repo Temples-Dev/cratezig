@@ -66,20 +66,27 @@ pub fn list(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Response {
     defer ContainerStore.releaseList(alloc, containers);
     const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
 
-    var result = std.ArrayList(view.Summary).empty;
-    for (containers) |ctr| {
-        if (!all and !ctr.state.running) continue;
-        result.append(alloc, .{ .ctr = ctr, .now_ns = now }) catch return Response.internalError("out of memory");
-    }
-    // Newest first, like docker ps.
-    std.mem.sort(view.Summary, result.items, {}, struct {
-        fn gt(_: void, a: view.Summary, b: view.Summary) bool {
-            return a.ctr.created_at > b.ctr.created_at;
+    // Newest first, like docker ps. created_at is immutable, so no lock needed.
+    std.mem.sort(*Container, containers, {}, struct {
+        fn gt(_: void, a: *Container, b: *Container) bool {
+            return a.created_at > b.created_at;
         }
     }.gt);
 
-    const json = std.json.Stringify.valueAlloc(alloc, result.items, .{}) catch return Response.internalError("out of memory");
-    return Response.ok(json);
+    var out = std.ArrayList(u8).empty;
+    out.append(alloc, '[') catch return Response.internalError("out of memory");
+    var first = true;
+    for (containers) |ctr| {
+        ctr.lock();
+        defer ctr.unlock();
+        if (!all and !ctr.state.running) continue;
+        if (!first) out.append(alloc, ',') catch return Response.internalError("out of memory");
+        first = false;
+        const item = std.json.Stringify.valueAlloc(alloc, view.Summary{ .ctr = ctr, .now_ns = now }, .{}) catch return Response.internalError("out of memory");
+        out.appendSlice(alloc, item) catch return Response.internalError("out of memory");
+    }
+    out.append(alloc, ']') catch return Response.internalError("out of memory");
+    return Response.ok(out.items);
 }
 
 // GET /containers/{name}/json
@@ -88,7 +95,9 @@ pub fn inspect(daemon: *Daemon, req: *Request, alloc: std.mem.Allocator) Respons
     const ctr = daemon.containers.get(name) orelse return Response.notFound("container not found");
     defer ctr.release();
 
-    const json = std.json.Stringify.valueAlloc(alloc, ctr, .{}) catch "{}";
+    ctr.lock();
+    defer ctr.unlock();
+    const json = std.json.Stringify.valueAlloc(alloc, view.Inspect{ .ctr = ctr }, .{}) catch return Response.internalError("out of memory");
     return Response.ok(json);
 }
 

@@ -321,7 +321,7 @@ fn parseHostConfig(val: ?std.json.Value, a: std.mem.Allocator, hc: *HostConfig) 
     if (jsonInt(obj.get("CpuShares"))) |v| hc.cpu_shares = v;
     if (jsonInt(obj.get("CpuQuota"))) |v| hc.cpu_quota = v;
     if (jsonInt(obj.get("CpuPeriod"))) |v| hc.cpu_period = v;
-    if (jsonInt(obj.get("PidLimits"))) |v| hc.pid_limits = v;
+    if (jsonInt(obj.get("PidsLimit") orelse obj.get("PidLimits"))) |v| hc.pid_limits = v;
     if (jsonInt(obj.get("ShmSize"))) |v| hc.shm_size = v;
     if (jsonBool(obj.get("Privileged"))) |v| hc.privleged = v;
     if (jsonBool(obj.get("ReadonlyRootfs"))) |v| hc.read_only_rootfs = v;

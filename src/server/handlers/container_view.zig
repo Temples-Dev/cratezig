@@ -3,6 +3,7 @@
 const std = @import("std");
 const Container = @import("../../container/container.zig").Container;
 const ContainerState = @import("../../container/container.zig").ContainerState;
+const timefmt = @import("../../util/timefmt.zig");
 
 pub const Summary = struct {
     ctr: *Container,
@@ -62,6 +63,69 @@ fn writeCommand(jws: anytype, c: *const Container) !void {
     }
     try jws.write(w.buffered());
 }
+
+/// GET /containers/{id}/json (`docker inspect`). Caller holds the lock.
+pub const Inspect = struct {
+    ctr: *Container,
+
+    pub fn jsonStringify(self: Inspect, jws: anytype) !void {
+        const c = self.ctr;
+        var t1: [40]u8 = undefined;
+        var t2: [40]u8 = undefined;
+        var t3: [40]u8 = undefined;
+        var name_buf: [80]u8 = undefined;
+        const st = c.state;
+
+        try jws.beginObject();
+        try jws.objectField("Id");
+        try jws.write(c.id[0..]);
+        try jws.objectField("Created");
+        try jws.write(timefmt.rfc3339(&t1, c.created_at));
+        // Path is the first word of entrypoint+cmd, Args the rest.
+        var words: [2][]const []const u8 = .{ c.config.entrypoint, c.config.cmd };
+        const path_src: usize = if (words[0].len > 0) 0 else 1;
+        try jws.objectField("Path");
+        try jws.write(if (words[path_src].len > 0) words[path_src][0] else "");
+        if (words[path_src].len > 0) words[path_src] = words[path_src][1..];
+        try jws.objectField("Args");
+        try jws.beginArray();
+        for (words) |part| for (part) |arg| try jws.write(arg);
+        try jws.endArray();
+        try jws.objectField("State");
+        try jws.write(.{
+            .Status = @tagName(st.status),
+            .Running = st.running,
+            .Paused = st.paused,
+            .Restarting = st.restarting,
+            .OOMKilled = st.oom_killed,
+            .Dead = st.dead,
+            .Pid = st.pid,
+            .ExitCode = st.exit_code,
+            .Error = "",
+            .StartedAt = timefmt.rfc3339(&t2, st.started_at),
+            .FinishedAt = timefmt.rfc3339(&t3, st.finished_at),
+        });
+        try jws.objectField("Image");
+        try jws.write(c.image_id);
+        try jws.objectField("Name");
+        try jws.write(std.fmt.bufPrint(&name_buf, "/{s}", .{c.name}) catch c.name);
+        try jws.objectField("RestartCount");
+        try jws.write(c.restart_count);
+        try jws.objectField("Driver");
+        try jws.write("overlay2");
+        try jws.objectField("Platform");
+        try jws.write("linux");
+        try jws.objectField("HostConfig");
+        try jws.write(c.host_config);
+        try jws.objectField("Config");
+        try jws.write(c.config);
+        try jws.objectField("NetworkSettings");
+        try jws.write(c.network_settings);
+        try jws.objectField("Mounts");
+        try jws.write(.{});
+        try jws.endObject();
+    }
+};
 
 /// Docker's human status column: "Up 5 minutes", "Exited (0) 2 hours ago".
 pub fn status(buf: []u8, st: ContainerState, now_ns: i128) []const u8 {

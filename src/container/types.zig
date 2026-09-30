@@ -125,7 +125,7 @@ pub const HostConfig = struct {
         try jws.write(self.cpu_quota);
         try jws.objectField("CpuPeriod");
         try jws.write(self.cpu_period);
-        try jws.objectField("PidLimits");
+        try jws.objectField("PidsLimit");
         try jws.write(self.pid_limits);
         
         try jws.objectField("PortBindings");
@@ -259,7 +259,27 @@ pub const NetworkSettings = struct {
     }
 };
 
-pub const EndpointSettings = struct { network_id: []const u8 = "", endpoint_id: []const u8 = "", gateway: []const u8 = "", ip_address: []const u8 = "", ip_prefix_len: u8 = 0, mac_address: []const u8 = "", aliases: []const []const u8 = &.{} };
+pub const EndpointSettings = struct {
+    network_id: []const u8 = "",
+    endpoint_id: []const u8 = "",
+    gateway: []const u8 = "",
+    ip_address: []const u8 = "",
+    ip_prefix_len: u8 = 0,
+    mac_address: []const u8 = "",
+    aliases: []const []const u8 = &.{},
+
+    pub fn jsonStringify(self: EndpointSettings, jws: anytype) !void {
+        try jws.write(.{
+            .NetworkID = self.network_id,
+            .EndpointID = self.endpoint_id,
+            .Gateway = self.gateway,
+            .IPAddress = self.ip_address,
+            .IPPrefixLen = self.ip_prefix_len,
+            .MacAddress = self.mac_address,
+            .Aliases = self.aliases,
+        });
+    }
+};
 
 
 pub const PortBinding = struct {
