@@ -2,142 +2,114 @@ const std = @import("std");
 const Daemon = @import("daemon.zig").Daemon;
 const Container = @import("../container/container.zig").Container;
 const ExecProcess = @import("../container/container.zig").ExecProcess;
+const clone = @import("../container/clone.zig");
 const runc = @import("../runtime/runc.zig");
+const fsutil = @import("../util/fsutil.zig");
+const CrateError = @import("../errdefs/errors.zig").Error;
 
+/// Registers an exec session. Returns its id, allocated with `allocator`.
 pub fn containerExecCreate(daemon: *Daemon, container_name: []const u8, cmd: []const []const u8, privileged: bool, tty: bool, allocator: std.mem.Allocator) ![]const u8 {
-    const ctr = daemon.containers.get(container_name) orelse return error.ContainerNotFound;
+    if (cmd.len == 0) return CrateError.InvalidParameter;
+    const ctr = daemon.containers.get(container_name) orelse return CrateError.ContainerNotFound;
 
-    ctr.lock();
-    const is_running = ctr.state.running;
-    ctr.unlock();
-
-    if (!is_running) {
-        return error.ContainerNotRunning;
-    }
-
-    var bytes: [16]u8 = undefined;
+    var bytes: [32]u8 = undefined;
     try daemon.config.io.randomSecure(&bytes);
-    
-    var hex_buf: [32]u8 = undefined;
     const hex = std.fmt.bytesToHex(bytes, .lower);
-    @memcpy(&hex_buf, &hex);
-    
-    const exec_id = try std.fmt.allocPrint(allocator, "exec-{s}", .{hex_buf});
-    errdefer allocator.free(exec_id);
 
-    var cmd_dup = try allocator.alloc([]const u8, cmd.len);
-    errdefer allocator.free(cmd_dup);
-    for (cmd, 0..) |arg, i| {
-        cmd_dup[i] = try allocator.dupe(u8, arg);
-    }
-
-    const exec_proc = try allocator.create(ExecProcess);
-    exec_proc.* = .{
-        .id = exec_id,
-        .running = false,
-        .exit_code = 0,
-        .pid = 0,
-        .tty = tty,
-        .container_id = try allocator.dupe(u8, ctr.id[0..]),
-        .cmd = cmd_dup,
-        .privileged = privileged,
-    };
-
-    ctr.lock();
-    try ctr.exec_commands.put(exec_id, exec_proc);
-    ctr.unlock();
-
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
-    daemon.events.publish(.{
-        .event_type = .container,
-        .action = "exec_create",
-        .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
-        .time_nano = now,
-    });
-
-    return exec_id;
-}
-
-pub fn containerExecStart(daemon: *Daemon, exec_id: []const u8) !void {
-    var found_ctr: ?*Container = null;
-    var found_ep: ?*ExecProcess = null;
-
-    const list = try daemon.containers.list(daemon.allocator);
-    defer daemon.allocator.free(list);
-
-    for (list) |ctr| {
+    {
         ctr.lock();
-        if (ctr.exec_commands.get(exec_id)) |ep| {
-            found_ctr = ctr;
-            found_ep = ep;
-        }
-        ctr.unlock();
-        if (found_ctr != null) break;
+        defer ctr.unlock();
+        if (!ctr.state.running) return CrateError.ContainerNotRunning;
+
+        // Exec sessions live as long as the container, in its arena.
+        const a = ctr.allocator();
+        const ep = try a.create(ExecProcess);
+        ep.* = .{
+            .id = try a.dupe(u8, &hex),
+            .running = false,
+            .tty = tty,
+            .container_id = try a.dupe(u8, ctr.id[0..]),
+            .cmd = try clone.strings(a, cmd),
+            .privileged = privileged,
+        };
+        try ctr.exec_commands.put(ep.id, ep);
     }
 
-    const ctr = found_ctr orelse return error.ExecNotFound;
-    const ep = found_ep.?;
-
-    ctr.lock();
-    const container_id = ctr.id[0..];
-    const is_running = ctr.state.running;
-    ctr.unlock();
-
-    if (!is_running) return error.ContainerNotRunning;
-
-    var spec_path_buf: [512]u8 = undefined;
-    const spec_path = try std.fmt.bufPrint(&spec_path_buf, "/run/runc/{s}/exec-{s}.json", .{ container_id, exec_id });
-
-    var json_buf: [4096]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&json_buf);
-
-    try writer.writeAll("{\"terminal\":");
-    try writer.print("{},", .{ep.tty});
-    try writer.writeAll("\"user\":{\"uid\":0,\"gid\":0},");
-    try writer.writeAll("\"args\":[");
-    for (ep.cmd, 0..) |arg, i| {
-        if (i > 0) try writer.writeByte(',');
-        try writer.writeByte('"');
-        try writer.writeAll(arg);
-        try writer.writeByte('"');
-    }
-    try writer.writeAll("],\"cwd\":\"/\"}");
-
-    const spec_json = json_buf[0..(json_buf.len - writer.unusedCapacityLen())];
-
-    const file = try std.Io.Dir.createFileAbsolute(daemon.config.io, spec_path, .{});
-    defer file.close(daemon.config.io);
-
-    try file.writePositionalAll(daemon.config.io, spec_json, 0);
-
-    const pid = try runc.execInContainer(daemon.config.io, container_id, spec_path);
-
-    ctr.lock();
-    ep.pid = pid;
-    ep.running = true;
-    ctr.unlock();
-
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
-    daemon.events.publish(.{
-        .event_type = .container,
-        .action = "exec_start",
-        .actor_id = container_id,
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
-        .time_nano = now,
-    });
+    const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
+    daemon.events.publish(.{ .event_type = .container, .action = "exec_create", .actor_id = ctr.id[0..], .time_nano = now });
+    return allocator.dupe(u8, &hex);
 }
 
-pub fn containerExecInspect(daemon: *Daemon, exec_id: []const u8) !*ExecProcess {
+const Found = struct { ctr: *Container, ep: *ExecProcess };
+
+fn find(daemon: *Daemon, exec_id: []const u8) !Found {
     const list = try daemon.containers.list(daemon.allocator);
     defer daemon.allocator.free(list);
-
     for (list) |ctr| {
         ctr.lock();
         defer ctr.unlock();
-        if (ctr.exec_commands.get(exec_id)) |ep| {
-            return ep;
-        }
+        if (ctr.exec_commands.get(exec_id)) |ep| return .{ .ctr = ctr, .ep = ep };
     }
-    return error.ExecNotFound;
+    return CrateError.ExecNotFound;
+}
+
+/// Starts a detached exec. Output is discarded until hijacked streams land
+/// (Phase 1/3); the exit code is recorded for exec inspect.
+pub fn containerExecStart(daemon: *Daemon, exec_id: []const u8) !void {
+    const f = try find(daemon, exec_id);
+    const io = daemon.config.io;
+
+    var spec_path_buf: [512]u8 = undefined;
+    var spec_path: []const u8 = undefined;
+    {
+        f.ctr.lock();
+        defer f.ctr.unlock();
+        if (!f.ctr.state.running) return CrateError.ContainerNotRunning;
+        if (f.ep.running) return CrateError.ContainerAlreadyRunning;
+
+        var dir_buf: [256]u8 = undefined;
+        const bundle = try daemon.config.bundleDir(f.ctr.id[0..], &dir_buf);
+        spec_path = try std.fmt.bufPrint(&spec_path_buf, "{s}/exec-{s}.json", .{ bundle, f.ep.id });
+        const process = .{
+            .terminal = false,
+            .user = .{ .uid = 0, .gid = 0 },
+            .args = f.ep.cmd,
+            .env = f.ctr.config.env,
+            .cwd = if (f.ctr.config.working_dir.len > 0) f.ctr.config.working_dir else "/",
+        };
+        try fsutil.writeJsonAtomic(io, daemon.allocator, spec_path, process);
+    }
+
+    var child = try runc.exec(io, f.ctr.id[0..], spec_path);
+
+    f.ctr.lock();
+    f.ep.pid = if (child.id) |pid| @intCast(pid) else 0;
+    f.ep.running = true;
+    f.ctr.unlock();
+
+    const thread = std.Thread.spawn(.{}, reap, .{ daemon, f, child }) catch |err| {
+        child.kill(io);
+        return err;
+    };
+    thread.detach();
+
+    const now = std.Io.Clock.now(.real, io).toNanoseconds();
+    daemon.events.publish(.{ .event_type = .container, .action = "exec_start", .actor_id = f.ctr.id[0..], .time_nano = now });
+}
+
+fn reap(daemon: *Daemon, f: Found, child: std.process.Child) void {
+    var c = child;
+    const term = c.wait(daemon.config.io) catch null;
+    f.ctr.lock();
+    defer f.ctr.unlock();
+    f.ep.running = false;
+    f.ep.exit_code = if (term) |t| switch (t) {
+        .exited => |code| code,
+        .signal => |sig| 128 + @as(i32, @intCast(@intFromEnum(sig))),
+        else => 255,
+    } else 255;
+}
+
+pub fn containerExecInspect(daemon: *Daemon, exec_id: []const u8) !*ExecProcess {
+    return (try find(daemon, exec_id)).ep;
 }

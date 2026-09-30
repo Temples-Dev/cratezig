@@ -21,12 +21,11 @@ pub fn containerPause(daemon: *Daemon, name: []const u8) !void {
     try ctr.persistState(&daemon.config);
     ctr.unlock();
 
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
     daemon.events.publish(.{
         .event_type = .container,
         .action = "pause",
         .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
         .time_nano = now,
     });
 }
@@ -50,12 +49,11 @@ pub fn containerUnpause(daemon: *Daemon, name: []const u8) !void {
     try ctr.persistState(&daemon.config);
     ctr.unlock();
 
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
     daemon.events.publish(.{
         .event_type = .container,
         .action = "unpause",
         .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
         .time_nano = now,
     });
 }

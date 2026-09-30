@@ -1,17 +1,27 @@
+//! Thin wrapper around the runc CLI. All state lives under `<exec-root>/runc`
+//! so cratezig never touches containers owned by Docker or containerd.
 const std = @import("std");
-const spec_gen = @import("spec_generator.zig");
-const privilege = @import("privilege.zig");
+
+/// Set once by `configure` at daemon startup, before any thread starts.
+var binary: []const u8 = "runc";
+var runc_root: []const u8 = "/run/cratezig/runc";
+
+pub fn configure(runc_binary: []const u8, root: []const u8) void {
+    binary = runc_binary;
+    runc_root = root;
+}
 
 pub const RuncState = struct {
     id: []const u8,
     pid: u32,
-    status: []const u8, // "created", "running", "stopped"
+    status: []const u8, // "created", "running", "paused", "stopped"
     bundle: []const u8,
 };
 
 pub const ParsedState = struct {
     raw_stdout: []u8,
     parsed: std.json.Parsed(RuncState),
+
     pub fn deinit(self: ParsedState, allocator: std.mem.Allocator) void {
         self.parsed.deinit();
         allocator.free(self.raw_stdout);
@@ -23,183 +33,122 @@ const RunResult = struct {
     stderr: []u8,
     term: std.process.Child.Term,
 
-    pub fn deinit(self: RunResult, allocator: std.mem.Allocator) void {
+    fn ok(self: RunResult) bool {
+        return self.term == .exited and self.term.exited == 0;
+    }
+
+    fn deinit(self: RunResult, allocator: std.mem.Allocator) void {
         allocator.free(self.stdout);
         allocator.free(self.stderr);
     }
 };
 
-fn runCmd(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) !RunResult {
+/// Runs `runc --root <runc_root> <args...>` and collects its output. Only for
+/// subcommands that do not hand their stdio to a container process.
+fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !RunResult {
+    var argv_buf: [16][]const u8 = undefined;
+    if (args.len + 3 > argv_buf.len) return error.InvalidParameter;
+    argv_buf[0] = binary;
+    argv_buf[1] = "--root";
+    argv_buf[2] = runc_root;
+    @memcpy(argv_buf[3 .. 3 + args.len], args);
+
     var proc = try std.process.spawn(io, .{
-        .argv = argv,
+        .argv = argv_buf[0 .. 3 + args.len],
+        .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
 
     var stdout_buf: [1024]u8 = undefined;
     var stdout_reader = proc.stdout.?.reader(io, &stdout_buf);
-    const stdout = try stdout_reader.interface.allocRemaining(allocator, .unlimited);
+    const stdout = try stdout_reader.interface.allocRemaining(allocator, .limited(4 * 1024 * 1024));
     errdefer allocator.free(stdout);
 
     var stderr_buf: [1024]u8 = undefined;
     var stderr_reader = proc.stderr.?.reader(io, &stderr_buf);
-    const stderr = try stderr_reader.interface.allocRemaining(allocator, .unlimited);
+    const stderr = try stderr_reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
     errdefer allocator.free(stderr);
 
+    return .{ .stdout = stdout, .stderr = stderr, .term = try proc.wait(io) };
+}
+
+fn runChecked(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const result = try run(io, allocator, args);
+    defer result.deinit(allocator);
+    if (!result.ok()) {
+        std.log.err("runc {s} failed: {s}", .{ args[0], std.mem.trim(u8, result.stderr, " \n") });
+        return error.RuntimeError;
+    }
+}
+
+/// `runc create`. The container's stdout/stderr go to `output` (a file owned
+/// by the caller); runc's own diagnostics go to `<bundle>/runc.log`. Pipes
+/// must not be used here: the container inherits them and they never close.
+pub fn create(io: std.Io, container_id: []const u8, bundle_dir: []const u8, output: std.Io.File) !void {
+    var log_buf: [512]u8 = undefined;
+    const log_path = try std.fmt.bufPrint(&log_buf, "{s}/runc.log", .{bundle_dir});
+
+    var proc = try std.process.spawn(io, .{
+        .argv = &.{ binary, "--root", runc_root, "--log", log_path, "create", "--bundle", bundle_dir, container_id },
+        .stdin = .ignore,
+        .stdout = .{ .file = output },
+        .stderr = .{ .file = output },
+    });
     const term = try proc.wait(io);
-    return RunResult{
-        .stdout = stdout,
-        .stderr = stderr,
-        .term = term,
-    };
-}
-
-pub fn prepareBundle(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    bundle_dir: []const u8,
-    args: []const []const u8,
-    env: []const []const u8,
-    level: privilege.PrivilegeLevel,
-) !void {
-    const generator = spec_gen.SpecGenerator.init(allocator);
-    var spec = try generator.generate(args, env, level);
-    defer {
-        allocator.free(spec.linux.maskedPaths);
-        allocator.free(spec.linux.readonlyPaths);
-        spec.deinit(allocator);
-    }
-
-    var config_path_buf: [512]u8 = undefined;
-    const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/config.json", .{bundle_dir});
-
-    var file = try std.Io.Dir.createFile(.cwd(), io, config_path, .{});
-    defer file.close(io);
-
-    var json_buf = std.ArrayList(u8).empty;
-    defer json_buf.deinit(allocator);
-
-    try std.json.stringify(spec, .{}, json_buf.writer(allocator));
-    _ = try file.writer(io).write(json_buf.items);
-}
-
-pub fn create(io: std.Io, container_id: []const u8, bundle_dir: []const u8, allocator: std.mem.Allocator) !void {
-    const result = try runCmd(io, allocator, &.{ "runc", "create", "--bundle", bundle_dir, container_id });
-    defer result.deinit(allocator);
-
-    if (result.term != .exited or result.term.exited != 0) {
-        std.log.err("runc create failed: {s}", .{result.stderr});
+    if (term != .exited or term.exited != 0) {
+        std.log.err("runc create {s} failed, see {s}", .{ container_id[0..@min(12, container_id.len)], log_path });
         return error.RuntimeError;
     }
 }
 
-pub fn start(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !u32 {
-    const result = try runCmd(io, allocator, &.{ "runc", "start", container_id });
-    defer result.deinit(allocator);
-
-    if (result.term != .exited or result.term.exited != 0) {
-        return error.RuntimeError;
-    }
-
-    const state = try getState(io, container_id, allocator);
-    defer state.deinit(allocator);
-    return state.parsed.value.pid;
-}
-
-test "runc prepare bundle with privilege spec" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-
-    const tmp_dir = "/tmp/cratezig-bundle-test";
-    var dir = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch return;
-    dir.makeDir(io, "cratezig-bundle-test") catch {};
-
-    const args = [_][]const u8{"/bin/echo", "hello"};
-    const env = [_][]const u8{"ENV=test"};
-
-    try prepareBundle(io, alloc, tmp_dir, &args, &env, .standard);
-
-    var config_file = try std.Io.Dir.openFileAbsolute(io, "/tmp/cratezig-bundle-test/config.json", .{});
-    defer config_file.close(io);
-
-    var read_buf: [1024]u8 = undefined;
-    var reader = config_file.reader(io, &read_buf);
-    const content = try reader.interface.readAlloc(alloc, 4096);
-    defer alloc.free(content);
-
-    try std.testing.expect(content.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, content, "CAP_CHOWN") != null);
+pub fn start(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !void {
+    try runChecked(io, allocator, &.{ "start", container_id });
 }
 
 pub fn getState(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !ParsedState {
-    const result = try runCmd(io, allocator, &.{ "runc", "state", container_id });
-    errdefer result.deinit(allocator);
-
-    if (result.term != .exited or result.term.exited != 0) {
+    const result = try run(io, allocator, &.{ "state", container_id });
+    if (!result.ok()) {
         result.deinit(allocator);
         return error.RuntimeError;
     }
-
-    var state_wrapper = ParsedState{
-        .raw_stdout = result.stdout,
-        .parsed = undefined,
-    };
-    errdefer allocator.free(state_wrapper.raw_stdout);
     allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
 
-    state_wrapper.parsed = try std.json.parseFromSlice(RuncState, allocator, state_wrapper.raw_stdout, .{ .ignore_unknown_fields = true });
-    return state_wrapper;
+    return .{
+        .raw_stdout = result.stdout,
+        .parsed = try std.json.parseFromSlice(RuncState, allocator, result.stdout, .{ .ignore_unknown_fields = true }),
+    };
 }
 
 pub fn kill(io: std.Io, container_id: []const u8, signal: []const u8, allocator: std.mem.Allocator) !void {
-    const result = try runCmd(io, allocator, &.{ "runc", "kill", container_id, signal });
-    defer result.deinit(allocator);
-
-    if (result.term != .exited or result.term.exited != 0) {
-        return error.RuntimeError;
-    }
+    try runChecked(io, allocator, &.{ "kill", container_id, signal });
 }
 
 pub fn pause(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !void {
-    const result = try runCmd(io, allocator, &.{ "runc", "pause", container_id });
-    defer result.deinit(allocator);
-
-    if (result.term != .exited or result.term.exited != 0) {
-        return error.RuntimeError;
-    }
+    try runChecked(io, allocator, &.{ "pause", container_id });
 }
 
 pub fn unpause(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !void {
-    const result = try runCmd(io, allocator, &.{ "runc", "resume", container_id });
-    defer result.deinit(allocator);
+    try runChecked(io, allocator, &.{ "resume", container_id });
+}
 
-    if (result.term != .exited or result.term.exited != 0) {
-        return error.RuntimeError;
+/// Removes runc's record of the container. `force` also kills it if needed.
+pub fn delete(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator, force: bool) !void {
+    if (force) {
+        try runChecked(io, allocator, &.{ "delete", "--force", container_id });
+    } else {
+        try runChecked(io, allocator, &.{ "delete", container_id });
     }
 }
 
-
-pub fn wait(io: std.Io, container_id: []const u8, allocator: std.mem.Allocator) !i32 {
-    while (true) {
-        const state = getState(io, container_id, allocator) catch return 137;
-        defer state.deinit(allocator);
-        if (std.mem.eql(u8, state.parsed.value.status, "stopped")) {
-            break;
-        }
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
-    }
-
-    const result = try runCmd(io, allocator, &.{ "runc", "delete", container_id });
-    defer result.deinit(allocator);
-
-    return 0;
-}
-
-pub fn execInContainer(io: std.Io, container_id: []const u8, process_spec_path: []const u8) !u32 {
-    const proc = try std.process.spawn(io, .{
-        .argv = &.{ "runc", "exec", "--process", process_spec_path, container_id },
-        .stdout = .pipe,
-        .stderr = .pipe,
+/// Starts `runc exec` detached from the daemon's stdio. Returns the runc
+/// process; the caller owns waiting on it.
+pub fn exec(io: std.Io, container_id: []const u8, process_spec_path: []const u8) !std.process.Child {
+    return std.process.spawn(io, .{
+        .argv = &.{ binary, "--root", runc_root, "exec", "--process", process_spec_path, container_id },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
     });
-    return @intCast(proc.id.?);
 }

@@ -8,6 +8,7 @@ pub fn containerKill(daemon: *Daemon, name: []const u8, signal_opt: ?[]const u8)
     ctr.lock();
     const is_running = ctr.state.running;
     const signal = signal_opt orelse "SIGKILL";
+    if (is_running) ctr.restart_suppressed = true;
     ctr.unlock();
 
     if (!is_running) {
@@ -16,12 +17,11 @@ pub fn containerKill(daemon: *Daemon, name: []const u8, signal_opt: ?[]const u8)
 
     try runc.kill(daemon.config.io, ctr.id[0..], signal, daemon.allocator);
 
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
     daemon.events.publish(.{
         .event_type = .container,
         .action = "kill",
         .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
         .time_nano = now,
     });
 }

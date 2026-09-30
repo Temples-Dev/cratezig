@@ -7,6 +7,8 @@ pub fn containerStop(daemon: *Daemon, name: []const u8, timeout_secs: ?u32) !voi
     const ctr = daemon.containers.get(name) orelse return CrateError.ContainerNotFound;
 
     ctr.lock();
+    // Explicit stop always wins over the restart policy, even mid-backoff.
+    ctr.restart_suppressed = true;
     if (!ctr.state.running) {
         ctr.unlock();
         return;
@@ -18,14 +20,13 @@ pub fn containerStop(daemon: *Daemon, name: []const u8, timeout_secs: ?u32) !voi
 
     try runc.kill(daemon.config.io, ctr.id[0..], stop_signal, daemon.allocator);
 
-    const now_ts = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now_ts = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
 
     daemon.events.publish(
         .{
             .event_type = .container,
             .action = "kill",
             .actor_id = ctr.id[0..],
-            .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
             .time_nano = now_ts,
         }
     );
@@ -44,13 +45,12 @@ pub fn containerStop(daemon: *Daemon, name: []const u8, timeout_secs: ?u32) !voi
         try std.Io.sleep(daemon.config.io, std.Io.Duration.fromSeconds(2), .awake);
     }
 
-    const stop_ts = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const stop_ts = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
 
     daemon.events.publish(.{
         .event_type = .container,
         .action = "stop",
         .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
         .time_nano = stop_ts,
     });
 }

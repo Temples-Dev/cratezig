@@ -20,7 +20,8 @@ pub fn containerRemove(daemon: *Daemon, name: []const u8, force: bool, remove_vo
 
     ctr.lock();
     ctr.state.status = .removing;
-    try ctr.persistState(&daemon.config);
+    ctr.restart_suppressed = true;
+    ctr.persistState(&daemon.config) catch {};
     ctr.unlock();
 
     // 1. Unmount overlay filesystem if mounted
@@ -35,16 +36,17 @@ pub fn containerRemove(daemon: *Daemon, name: []const u8, force: bool, remove_vo
     const overlay_dir = try std.fmt.bufPrint(&overlay_buf, "{s}/overlay2/{s}", .{ daemon.config.data_root, ctr.rw_layer_id });
     std.Io.Dir.cwd().deleteTree(daemon.config.io, overlay_dir) catch {};
 
-    // 3. Delete from store
+    // 3. Delete from store. The Container itself is intentionally not freed
+    // yet: other handlers may still hold the pointer. Refcounted handles
+    // (Phase 1) will let us destroy it here.
     daemon.containers.delete(ctr.id[0..]);
 
     // 4. Publish event
-    const now = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
     daemon.events.publish(.{
         .event_type = .container,
         .action = "destroy",
         .actor_id = ctr.id[0..],
-        .actor_attrs = std.StringHashMap([]const u8).init(daemon.allocator),
         .time_nano = now,
     });
 }

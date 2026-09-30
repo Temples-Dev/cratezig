@@ -72,7 +72,7 @@ pub fn containerStats(daemon: *Daemon, name: []const u8, allocator: std.mem.Allo
     }
 
     var time_buf: [64]u8 = undefined;
-    const now_ts = std.Io.Clock.now(.awake, daemon.config.io).toNanoseconds();
+    const now_ts = std.Io.Clock.now(.real, daemon.config.io).toNanoseconds();
     const read_time = try std.fmt.bufPrint(&time_buf, "{d}", .{now_ts});
 
     var pids: u64 = 1;
